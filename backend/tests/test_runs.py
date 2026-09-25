@@ -157,7 +157,13 @@ async def test_events_stream_in_order_unchanged_and_persisted():
     assert run["pending_action"]["turn_id"] == "turn_1"
     assert run["pending_action"]["thread_id"] == "th_1"
     assert run["pending_action"]["tool_calls"] == [
-        {"tool_call_id": "call_1", "tool_name": "merge_pull_request", "arguments": MERGE_ARGS}
+        {
+            "tool_call_id": "call_1",
+            "source_event_id": "ev_2",
+            "server": "github",
+            "tool_name": "merge_pull_request",
+            "arguments": MERGE_ARGS,
+        }
     ]
 
     assert [(e["sequence"], e["type"]) for e in ledger["events"]] == [(i + 1, e["type"]) for i, e in enumerate(SCRIPT)]

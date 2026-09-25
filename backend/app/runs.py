@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from app.ledger import Ledger, utc_now
+from app.tools import merge_tool_call_deltas, resolve_tool_call
 from app.trueforge import TurnEvent, TurnHandle, TurnStreamGone
 
 logger = logging.getLogger(__name__)
@@ -54,17 +55,21 @@ class LiveRun:
         self._subscribers.discard(queue)
 
 
-def _pending_action(turn_id: str, event: dict[str, Any], tool_calls: dict[str, dict[str, Any]]) -> dict[str, Any]:
+def _pending_action(turn_id: str, event: dict[str, Any], messages: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     calls = []
     for ref in event.get("tool_calls", []):
-        call = tool_calls.get(ref["id"], {})
-        function = call.get("function", {})
-        raw_arguments = function.get("arguments")
-        try:
-            arguments = json.loads(raw_arguments) if raw_arguments else None
-        except json.JSONDecodeError:
-            arguments = raw_arguments
-        calls.append({"tool_call_id": ref["id"], "tool_name": function.get("name"), "arguments": arguments})
+        source = messages.get(ref.get("source_event_id"), [])
+        call = next((c for c in source if c.get("id") == ref["id"]), {"id": ref["id"]})
+        resolved = resolve_tool_call(call)
+        calls.append(
+            {
+                "tool_call_id": ref["id"],
+                "source_event_id": ref.get("source_event_id"),
+                "server": resolved.server,
+                "tool_name": resolved.name,
+                "arguments": resolved.arguments,
+            }
+        )
 
     # turn_id + thread_id + tool_call ids are what TrueForgeClient.resume_with_approval needs.
     return {
@@ -82,17 +87,25 @@ class RunManager:
         self._trueforge = trueforge
         self._live: dict[str, LiveRun] = {}
         self._pumps: dict[str, asyncio.Task[None]] = {}
+        self._approval_locks: dict[str, asyncio.Lock] = {}
+        # run_id -> (expires at, monotonic clock; GET /runs/{id}/release body)
+        self.release_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    def approval_lock(self, run_id: str) -> asyncio.Lock:
+        """Serializes approval calls per run so two requests can never both resume."""
+        return self._approval_locks.setdefault(run_id, asyncio.Lock())
 
     async def close(self) -> None:
         for task in self._pumps.values():
             task.cancel()
         await asyncio.gather(*self._pumps.values(), return_exceptions=True)
 
-    def start(self, run_id: str, session_id: str, turn_id: str, after_sequence: int = 0) -> None:
+    def start(self, run_id: str, session_id: str, turn_id: str, after_sequence: int = 0, base: int = 0) -> None:
+        """Pump a turn into the run. Its events are numbered base + TrueForge sequence in the run."""
         live = LiveRun()
-        live.last_sequence = after_sequence
+        live.last_sequence = max(after_sequence, base)
         self._live[run_id] = live
-        task = asyncio.create_task(self._pump(run_id, session_id, turn_id, live))
+        task = asyncio.create_task(self._pump(run_id, session_id, turn_id, live, base))
         self._pumps[run_id] = task
         task.add_done_callback(lambda _: self._pumps.pop(run_id, None))
 
@@ -102,21 +115,30 @@ class RunManager:
         if run["status"] not in ACTIVE_STATUSES or run_id in self._pumps:
             return
         live = self._live.get(run_id)
-        if (live is not None and live.finished) or await self._ledger.has_event(run_id, "turn.done"):
+        base = await self._ledger.turn_base(run_id, run["turn_id"])
+        if (live is not None and live.finished) or await self._ledger.has_event(run_id, "turn.done", after=base):
             return
-        self.start(run_id, run["session_id"], run["turn_id"], await self._ledger.last_sequence(run_id))
+        self.start(run_id, run["session_id"], run["turn_id"], await self._ledger.last_sequence(run_id), base)
 
-    async def _pump(self, run_id: str, session_id: str, turn_id: str, live: LiveRun) -> None:
-        tool_calls: dict[str, dict[str, Any]] = {}
+    async def _pump(self, run_id: str, session_id: str, turn_id: str, live: LiveRun, base: int) -> None:
+        # Tool calls per model.message id; the live stream sends them as delta fragments.
+        messages: dict[str, list[dict[str, Any]]] = {}
         pending = False
         attempt = 0
         try:
             while True:
                 try:
-                    stream = self._trueforge.stream_turn(session_id, turn_id, live.last_sequence or None)
+                    stream = self._trueforge.stream_turn(session_id, turn_id, (live.last_sequence - base) or None)
                     async for turn_event in stream:
-                        sequence = turn_event.sequence
-                        if sequence is None or sequence <= live.last_sequence:
+                        if turn_event.sequence is not None:
+                            sequence = base + turn_event.sequence
+                        elif turn_event.type == "turn.done":
+                            # Read back from TrueForge storage after the live buffer expired; it is the
+                            # turn's last event, so it goes after everything seen.
+                            sequence = live.last_sequence + 1
+                        else:
+                            continue
+                        if sequence <= live.last_sequence:
                             continue
                         attempt = 0
                         received_at = utc_now()
@@ -126,11 +148,14 @@ class RunManager:
                         self._ledger.append_event(run_id, sequence, event_type, data, received_at)
 
                         if event_type == "model.message":
-                            for call in event.get("tool_calls") or []:
-                                tool_calls[call["id"]] = call
+                            calls = messages.setdefault(event["id"], [])
+                            if event.get("tool_calls"):
+                                calls[:] = [json.loads(json.dumps(call)) for call in event["tool_calls"]]
+                        elif event_type == "model.message.delta" and event.get("tool_calls"):
+                            merge_tool_call_deltas(messages.setdefault(event["id"], []), event["tool_calls"])
                         elif event_type == "tool.approval_required":
                             pending = True
-                            self._ledger.set_pending_action(run_id, _pending_action(turn_id, event, tool_calls))
+                            self._ledger.set_pending_action(run_id, _pending_action(turn_id, event, messages))
                         elif event_type == "turn.done":
                             live.finished = True
                             state = (event.get("state") or {}).get("status", "done")

@@ -43,6 +43,16 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_run_id ON approvals(run_id);
 
+-- Every TrueForge turn a run has streamed. A resumed turn numbers its events from 1 again,
+-- so its events are stored at base_sequence + turn sequence.
+CREATE TABLE IF NOT EXISTS turns (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    turn_id TEXT NOT NULL,
+    base_sequence INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, turn_id)
+);
+
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
@@ -136,7 +146,75 @@ class Ledger:
             " VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
             (run_id, repo, mode, int(via_fork), session_id, turn_id, utc_now()),
         )
+        await self.db.execute(
+            "INSERT INTO turns (run_id, turn_id, base_sequence, created_at) VALUES (?, ?, 0, ?)",
+            (run_id, turn_id, utc_now()),
+        )
         await self.db.commit()
+
+    async def begin_turn(self, run_id: str, turn_id: str, base_sequence: int) -> None:
+        """Make turn_id the run's current turn, e.g. the turn TrueForge created on resume."""
+        await self.db.execute(
+            "INSERT INTO turns (run_id, turn_id, base_sequence, created_at) VALUES (?, ?, ?, ?)",
+            (run_id, turn_id, base_sequence, utc_now()),
+        )
+        await self.db.execute(
+            "UPDATE runs SET turn_id = ?, status = 'running', pending_action = NULL WHERE id = ?",
+            (turn_id, run_id),
+        )
+        await self.db.commit()
+
+    async def turn_base(self, run_id: str, turn_id: str) -> int:
+        cursor = await self.db.execute(
+            "SELECT base_sequence FROM turns WHERE run_id = ? AND turn_id = ?", (run_id, turn_id)
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def record_approval(
+        self,
+        *,
+        run_id: str,
+        tool_name: str,
+        arguments: Any,
+        decision: str,
+        approver: str,
+        result: str,
+    ) -> dict[str, Any]:
+        """Durably record one approval attempt. result is "accepted" or "refused: <reason>"."""
+        row = {
+            "tool_name": tool_name,
+            "arguments": arguments,
+            "decision": decision,
+            "approver": approver,
+            "decided_at": utc_now(),
+            "result": result,
+        }
+        await self.db.execute(
+            "INSERT INTO approvals (run_id, tool_name, arguments_json, decision, approver, decided_at, result)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run_id, tool_name, json.dumps(arguments), decision, approver, row["decided_at"], result),
+        )
+        await self.db.commit()
+        return row
+
+    async def accepted_approval(self, run_id: str) -> dict[str, Any] | None:
+        cursor = await self.db.execute(
+            "SELECT tool_name, arguments_json, decision, approver, decided_at, result FROM approvals"
+            " WHERE run_id = ? AND result = 'accepted' ORDER BY id LIMIT 1",
+            (run_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {
+            "tool_name": row["tool_name"],
+            "arguments": json.loads(row["arguments_json"]),
+            "decision": row["decision"],
+            "approver": row["approver"],
+            "decided_at": row["decided_at"],
+            "result": row["result"],
+        }
 
     def append_event(self, run_id: str, sequence: int, event_type: str, payload_json: str, received_at: str) -> None:
         async def write(db: aiosqlite.Connection) -> None:
@@ -180,9 +258,10 @@ class Ledger:
         row = await cursor.fetchone()
         return row[0] or 0
 
-    async def has_event(self, run_id: str, event_type: str) -> bool:
+    async def has_event(self, run_id: str, event_type: str, after: int = 0) -> bool:
         cursor = await self.db.execute(
-            "SELECT 1 FROM events WHERE run_id = ? AND type = ? LIMIT 1", (run_id, event_type)
+            "SELECT 1 FROM events WHERE run_id = ? AND type = ? AND sequence > ? LIMIT 1",
+            (run_id, event_type, after),
         )
         return await cursor.fetchone() is not None
 

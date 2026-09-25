@@ -155,6 +155,24 @@ class TrueForgeClient:
             async for event in _parse_sse(response):
                 yield event
 
+    async def get_tool_call(
+        self, session_id: str, turn_id: str, tool_call_id: str, source_event_id: str
+    ) -> dict[str, Any] | None:
+        """The tool call as TrueForge persisted it, i.e. exactly what it will execute on approval."""
+        params: dict[str, Any] = {"limit": 100}
+        while True:
+            body = await self._request("GET", f"/sessions/{session_id}/turns/{turn_id}/events", params=params)
+            for event in body["data"]:
+                if event["id"] == source_event_id and event["type"] == "model.message":
+                    for call in event.get("tool_calls") or []:
+                        if call.get("id") == tool_call_id:
+                            return call
+                    return None
+            next_token = body["pagination"].get("next_page_token")
+            if not next_token:
+                return None
+            params["page_token"] = next_token
+
     async def _stored_turn_done(self, session_id: str, turn_id: str) -> TurnEvent:
         # Persisted events carry no sequence number.
         body = await self._request(

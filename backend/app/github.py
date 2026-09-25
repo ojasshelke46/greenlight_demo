@@ -39,7 +39,13 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-    async def _get(self, path: str) -> httpx.Response:
+    async def _get(self, path: str, *, fresh: bool = False, params: dict[str, str] | None = None) -> httpx.Response:
+        """fresh=True skips the cache, for checks that gate an irreversible action."""
+        if fresh or params:
+            return await self._http.get(
+                f"{GITHUB_API_URL}{path}", headers=self._headers(), params=params, timeout=10.0
+            )
+
         now = time.monotonic()
         cached = self._cache.get(path)
         if cached is not None and cached[0] > now:
@@ -50,8 +56,8 @@ class GitHubClient:
             self._cache[path] = (now + CACHE_TTL_SECONDS, response)
         return response
 
-    async def check_access(self, owner: str, repo: str) -> dict[str, Any]:
-        response = await self._get(f"/repos/{owner}/{repo}")
+    async def check_access(self, owner: str, repo: str, *, fresh: bool = False) -> dict[str, Any]:
+        response = await self._get(f"/repos/{owner}/{repo}", fresh=fresh)
         # GitHub answers 404 for private repos the token cannot see.
         if response.status_code == 404:
             return {"exists": False, "private": None, "default_branch": None, "bot_can_push": False}
@@ -65,8 +71,8 @@ class GitHubClient:
             "bot_can_push": bool(data.get("permissions", {}).get("push", False)),
         }
 
-    async def get_pr(self, owner: str, repo: str, number: int) -> dict[str, Any]:
-        response = await self._get(f"/repos/{owner}/{repo}/pulls/{number}")
+    async def get_pr(self, owner: str, repo: str, number: int, *, fresh: bool = False) -> dict[str, Any]:
+        response = await self._get(f"/repos/{owner}/{repo}/pulls/{number}", fresh=fresh)
         response.raise_for_status()
 
         data = response.json()
@@ -76,4 +82,19 @@ class GitHubClient:
             "base_ref": data["base"]["ref"],
             "head_ref": data["head"]["ref"],
             "head_repo_owner": head_repo["owner"]["login"] if head_repo else None,
+            "merged": bool(data.get("merged")),
+            "merge_commit_sha": data.get("merge_commit_sha"),
         }
+
+    async def latest_workflow_run(self, owner: str, repo: str, head_sha: str, branch: str) -> dict[str, Any] | None:
+        response = await self._get(
+            f"/repos/{owner}/{repo}/actions/runs",
+            params={"head_sha": head_sha, "branch": branch, "event": "push", "per_page": "1"},
+        )
+        response.raise_for_status()
+
+        runs = response.json().get("workflow_runs") or []
+        if not runs:
+            return None
+        run = runs[0]
+        return {"status": run["status"], "conclusion": run.get("conclusion"), "url": run["html_url"]}

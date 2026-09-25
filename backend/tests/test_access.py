@@ -134,6 +134,8 @@ async def test_get_pr_extracts_refs_and_head_owner():
         "base_ref": "main",
         "head_ref": "greenlight/node-fetch",
         "head_repo_owner": "greenlight-agent",
+        "merged": False,
+        "merge_commit_sha": None,
     }
 
 
