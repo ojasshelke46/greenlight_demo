@@ -8,23 +8,23 @@ web
 
 ## Stack
 
-Next.js frontend using the TrueForge TypeScript SDK (`@truefoundry/trueforge-sdk`), next to the existing Python FastAPI backend in `backend/`.
+Next.js frontend in `frontend/`, next to the Python FastAPI backend in `backend/`.
 
-Binding split, confirmed by the user:
+Binding, confirmed by the user:
 
-- Next.js may use the SDK server side to read sessions and stream turn events.
-- Every approve or reject decision goes through the FastAPI backend, `POST /runs/{id}/approval`. The Next.js app never resumes a TrueForge turn with an approval itself, because the server side merge checks and the ledger live only in the backend.
+- The frontend never calls TrueForge or GitHub. Its server side route handlers (`frontend/app/api/*`) proxy to the backend and attach `Authorization: Bearer ${GREENLIGHT_API_KEY}` from server env.
+- Every approve or reject decision goes through the backend, `POST /runs/{id}/approval`, where the merge checks and the ledger live.
 - API keys and tokens stay in server side env vars (`.env.local`, gitignored). Nothing secret in client code.
 
-Backend endpoints the UI builds on: `GET /access?repo=`, `POST /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` (SSE, resumable with `Last-Event-ID`), `GET /runs/{id}/ledger`, `POST /runs/{id}/approval`, `GET /runs/{id}/release`.
+Backend endpoints the UI builds on: `GET /access?repo=`, `POST /runs`, `GET /runs`, `GET /runs/{id}`, `GET /runs/{id}/events` (SSE, resumable with `Last-Event-ID`), `GET /runs/{id}/ledger`, `POST /runs/{id}/approval`, `GET /runs/{id}/release`, `GET /health`.
 
 ## Users
 
-Developers and hackathon judges watching a live demo on a projector from 3 to 10 metres away. They must understand what the agent is doing within 2 seconds of looking. The person driving the demo is a developer who pastes a repo link, watches the run, and makes the merge decision.
+Developers and hackathon judges watching a live demo. They must understand what the agent is doing within seconds of looking. The person driving the demo is a developer who pastes a repo link into a chat style composer, watches the agent answer with what it actually did, and makes the merge decision.
 
 ## Product Purpose
 
-Greenlight is a live control room for an AI agent that takes any GitHub repo link, fixes vulnerable dependencies in a sandbox until tests pass, and opens a PR. On repos where it is a collaborator, it waits for human approval before merging.
+Greenlight is a chat first interface for an AI agent that takes any GitHub repo link, fixes vulnerable dependencies in a sandbox until tests pass, and opens a PR. On repos where it is a collaborator, it waits for human approval before merging.
 
 The UI exists to:
 
@@ -64,8 +64,11 @@ The UI will show all four of: every live agent event, why the merge is safe (the
 User stated, binding:
 
 - Name: Greenlight.
-- Dark, desktop web, projector friendly.
-- Colour carries meaning and nothing else: red is vulnerable or blocked, amber is the agent working, green is tests passing or approved. These colours are never used for anything else.
+- Chat first agent interface, dark, modelled on a premium AI agent app. No dashboard grid.
+- One accent colour, electric lime, defined once as `--accent` so it can be swapped in one line.
+- Status colours appear only inside agent output: red for vulnerable or failing, amber for in progress, the accent for passing or done.
+- No traffic lights, lamps, or signal metaphors anywhere in code, copy, or assets.
+- The visual system is recorded in DESIGN.md.
 
 ## Evidence on Hand
 
@@ -75,8 +78,8 @@ User stated, binding:
 
 ## Product Principles
 
-1. Every state on screen comes from a real agent event. Nothing is animated ahead of the agent or faked.
-2. Colour means something. Red, amber and green are reserved for their states.
-3. One focal point at a time.
-4. The human approval is the climax. It should feel like turning a launch key.
-5. Show why it is safe, not just that it is: the gate's checks and refusals are visible, and the ledger backs them.
+1. Every state on screen comes from a real agent event. Nothing appears before the event that proves it.
+2. Status colour lives only inside agent output, and always means the same thing.
+3. One focal point at a time: when approval is due, the rest of the conversation steps back.
+4. The human approval is the climax. It takes a deliberate two second hold, never a stray click.
+5. Show why it is safe, not just that it is: the policy, the approval card's facts, and the ledger back every merge.
