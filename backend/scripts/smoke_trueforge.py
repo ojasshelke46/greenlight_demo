@@ -31,7 +31,9 @@ def summarize(data: dict) -> str:
     if kind == "tool.response":
         return f"tool_call_id={data.get('tool_call_id')} {str(data.get('content'))[:100]!r}"
     if kind in ("turn.created", "turn.update", "turn.done"):
-        return f"status={data.get('state', {}).get('status')}"
+        state = data.get("state", {})
+        reason = f" reason={state['reason']}" if state.get("reason") else ""
+        return f"status={state.get('status')}{reason}"
     if kind in ("tool.approval_required", "tool.response_required"):
         return f"thread={data.get('thread_id')} calls={[c['id'] for c in data.get('tool_calls', [])]}"
     return ""

@@ -116,6 +116,31 @@ class TrueForgeClient:
         turn_id: str,
         after_sequence: int | None = None,
     ) -> AsyncIterator[TurnEvent]:
+        # TrueForge closes a subscribe stream after TURN_SUBSCRIBE_TIMEOUT_MS (default 10 min),
+        # possibly before turn.done is sent, so reconnect from the last sequence until it arrives.
+        last_sequence = after_sequence
+        while True:
+            try:
+                async for event in self._subscribe(session_id, turn_id, last_sequence):
+                    yield event
+                    if event.sequence is not None:
+                        last_sequence = event.sequence
+                    if event.type == "turn.done":
+                        return
+            except TurnStreamGone:
+                pass
+
+            turn = await self._request("GET", f"/sessions/{session_id}/turns/{turn_id}")
+            if turn["data"]["state"]["status"] != "running":
+                yield await self._stored_turn_done(session_id, turn_id)
+                return
+
+    async def _subscribe(
+        self,
+        session_id: str,
+        turn_id: str,
+        after_sequence: int | None,
+    ) -> AsyncIterator[TurnEvent]:
         params = {} if after_sequence is None else {"after_sequence_number": after_sequence}
         url = self._url(f"/sessions/{session_id}/turns/{turn_id}/subscribe")
         timeout = httpx.Timeout(10.0, read=None)
@@ -129,8 +154,18 @@ class TrueForgeClient:
 
             async for event in _parse_sse(response):
                 yield event
-                if event.type == "turn.done":
-                    return
+
+    async def _stored_turn_done(self, session_id: str, turn_id: str) -> TurnEvent:
+        # Persisted events carry no sequence number.
+        body = await self._request(
+            "GET",
+            f"/sessions/{session_id}/turns/{turn_id}/events",
+            params={"order": "desc", "limit": 10},
+        )
+        for event in body["data"]:
+            if event["type"] == "turn.done":
+                return TurnEvent(sequence=None, type="turn.done", data=event)
+        raise TrueForgeError(f"turn {turn_id} finished but has no stored turn.done event")
 
     async def resume_with_approval(
         self,
