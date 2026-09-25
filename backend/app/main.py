@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.github import GitHubClient
 from app.ledger import Ledger
 from app.routes import api_router
+from app.runs import RunManager
 from app.trueforge import TrueForgeClient
 
 
@@ -26,8 +27,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ledger = Ledger(settings.ledger_path)
         await ledger.init()
         app.state.ledger = ledger
+        app.state.run_manager = RunManager(ledger, app.state.trueforge_client)
 
-        yield
+        try:
+            yield
+        finally:
+            await app.state.run_manager.close()
+            await ledger.close()
 
 
 def create_app() -> FastAPI:

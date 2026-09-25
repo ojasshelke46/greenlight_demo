@@ -18,10 +18,7 @@ class AccessResponse(BaseModel):
     via_fork: bool
 
 
-@router.get("/access", response_model=AccessResponse)
-async def access(request: Request, repo: str = Query(...)) -> AccessResponse:
-    github: GitHubClient = request.app.state.github_client
-
+async def resolve_access(github: GitHubClient, repo: str) -> AccessResponse:
     try:
         owner, name = parse_repo(repo)
     except InvalidRepoUrl as exc:
@@ -46,3 +43,8 @@ async def access(request: Request, repo: str = Query(...)) -> AccessResponse:
         mode_options=["ship", "pr_only"] if can_push else ["pr_only"],
         via_fork=not can_push,
     )
+
+
+@router.get("/access", response_model=AccessResponse)
+async def access(request: Request, repo: str = Query(...)) -> AccessResponse:
+    return await resolve_access(request.app.state.github_client, repo)
