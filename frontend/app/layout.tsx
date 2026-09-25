@@ -1,26 +1,24 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Inter, JetBrains_Mono, Sora } from "next/font/google";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
+// Sora for display, Inter for UI, JetBrains Mono for anything the agent executes.
+const sora = Sora({ variable: "--font-sora", subsets: ["latin"] });
+const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
+const jetbrains = JetBrains_Mono({ variable: "--font-jetbrains", subsets: ["latin"] });
 
 export const metadata: Metadata = {
   title: "Greenlight",
-  description: "Watch an agent fix vulnerable dependencies, and give it the green light to ship.",
+  description: "An agent that fixes vulnerable dependencies, and merges only with your approval.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}>
-      <body className="min-h-full bg-ink-950 font-sans text-fg">{children}</body>
+    <html lang="en" className={`${sora.variable} ${inter.variable} ${jetbrains.variable} h-full antialiased`}>
+      <body className="h-full font-sans text-fg">
+        <div aria-hidden className="canvas" />
+        {children}
+      </body>
     </html>
   );
 }

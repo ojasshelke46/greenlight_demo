@@ -9,11 +9,14 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@base-ui/react": "^1.8.0",
     "@phosphor-icons/react": "^2.1.10",
+    "clsx": "^2.1.1",
     "motion": "^13.4.4",
     "next": "16.3.6",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "shiki": "^4.4.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
