@@ -18,7 +18,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=None)) as http_client:
         app.state.http_client = http_client
-        app.state.trueforge_client = TrueForgeClient(http_client, settings)
+        app.state.trueforge_client = TrueForgeClient(
+            http_client, settings.trueforge_base_url, settings.trueforge_agent_name
+        )
         app.state.github_client = GitHubClient(http_client, settings)
 
         ledger = Ledger(settings.ledger_path)
