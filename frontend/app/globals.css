@@ -1,0 +1,106 @@
+@import "tailwindcss";
+
+/*
+  Dark only by brand commitment (PRODUCT.md). Red, amber and green are signal
+  colours and carry meaning only: red vulnerable or blocked, amber agent working,
+  green tests passing or approved. Never use them for decoration or emphasis.
+
+  Radius rule: panels, inputs, buttons and skeletons use rounded-xl. Circles are
+  reserved for state markers (lamps, pipeline nodes, radio dots); the traffic light
+  housing is the one other exception (physical object).
+*/
+@theme {
+  --color-ink-950: #0a0b0d;
+  --color-ink-900: #111317;
+  --color-ink-850: #16191e;
+  --color-ink-800: #1d2027;
+  --color-ink-700: #2a2e37;
+  --color-ink-600: #3a3f4a;
+
+  --color-fg: #eceef1;
+  --color-fg-muted: #a3a9b3;
+  --color-fg-subtle: #7c828d;
+
+  --color-signal-red: #f0585d;
+  --color-signal-amber: #f5a524;
+  --color-signal-green: #34c77b;
+}
+
+@theme inline {
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Projector legibility: 18px root so the smallest Tailwind step stays readable from the back of a room. */
+html {
+  font-size: 112.5%;
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ink-950);
+  color: var(--color-fg);
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-fg) 25%, transparent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-fg);
+  outline-offset: 3px;
+}
+
+.lamp {
+  --lamp: var(--color-fg-subtle);
+  position: relative;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--lamp) 13%, var(--color-ink-950));
+  box-shadow:
+    inset 0 2px 6px rgb(0 0 0 / 0.6),
+    inset 0 -1px 0 color-mix(in oklab, var(--lamp) 18%, transparent);
+}
+
+.lamp[data-signal="red"] {
+  --lamp: var(--color-signal-red);
+}
+.lamp[data-signal="amber"] {
+  --lamp: var(--color-signal-amber);
+}
+.lamp[data-signal="green"] {
+  --lamp: var(--color-signal-green);
+}
+
+/* The lit layer is a separate element so motion only animates its opacity. */
+.lamp-glow {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: radial-gradient(
+    circle at 38% 32%,
+    color-mix(in oklab, var(--lamp) 55%, white) 0%,
+    var(--lamp) 45%,
+    color-mix(in oklab, var(--lamp) 70%, black) 100%
+  );
+  box-shadow: 0 0 48px 4px color-mix(in oklab, var(--lamp) 40%, transparent);
+}
+
+.terminal-cursor {
+  display: inline-block;
+  width: 0.6em;
+  height: 1.1em;
+  vertical-align: text-bottom;
+  background: var(--color-fg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .terminal-cursor {
+    animation: cursor-blink 1.1s steps(1) infinite;
+  }
+}
+
+@keyframes cursor-blink {
+  50% {
+    opacity: 0;
+  }
+}
