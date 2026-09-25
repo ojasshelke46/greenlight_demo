@@ -11,6 +11,7 @@ from sse_starlette import EventSourceResponse
 from app.approvals import MERGE_TOOL, ApprovalRefused, check_merge, load_pending
 from app.auth import require_api_key
 from app.ledger import Ledger
+from app.log import run_id_var
 from app.routes.access import AccessResponse, resolve_access
 from app.runs import RunManager
 from app.trueforge import TrueForgeError
@@ -94,6 +95,7 @@ async def create_run(body: CreateRunRequest, request: Request) -> CreateRunRespo
     turn_id = turn.turn_id
 
     run_id = str(uuid.uuid4())
+    run_id_var.set(run_id)
     await state.ledger.create_run(
         run_id=run_id,
         repo=access.repo,

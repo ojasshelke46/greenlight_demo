@@ -15,6 +15,7 @@ dependencies = [
 
 [project.scripts]
 dev = "app.cli:dev"
+serve = "app.cli:serve"
 test = "app.cli:test"
 
 [build-system]

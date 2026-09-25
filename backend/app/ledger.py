@@ -7,6 +7,8 @@ from typing import Any
 
 import aiosqlite
 
+from app.log import run_id_var
+
 logger = logging.getLogger(__name__)
 
 _SCHEMA = """
@@ -90,7 +92,8 @@ class Ledger:
     def __init__(self, db_path: str) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
-        self._queue: asyncio.Queue[_Write | None] = asyncio.Queue()
+        # (run_id, write) pairs; the run id tags the log line if the write fails.
+        self._queue: asyncio.Queue[tuple[str, _Write] | None] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
 
     @property
@@ -123,13 +126,17 @@ class Ledger:
             while not self._queue.empty():
                 batch.append(self._queue.get_nowait())
 
+            run_id: str | None = None
             try:
-                for write in batch:
-                    if write is not None:
+                for item in batch:
+                    if item is not None:
+                        run_id, write = item
                         await write(self.db)
                 await self.db.commit()
             except Exception:
-                logger.exception("Ledger write failed")
+                token = run_id_var.set(run_id)
+                logger.exception("Ledger write failed; batch rolled back")
+                run_id_var.reset(token)
                 await self.db.rollback()
             finally:
                 for _ in batch:
@@ -224,7 +231,7 @@ class Ledger:
                 (run_id, sequence, event_type, payload_json, received_at),
             )
 
-        self._queue.put_nowait(write)
+        self._queue.put_nowait((run_id, write))
 
     def set_pending_action(self, run_id: str, pending_action: dict[str, Any]) -> None:
         async def write(db: aiosqlite.Connection) -> None:
@@ -233,13 +240,13 @@ class Ledger:
                 (json.dumps(pending_action), run_id),
             )
 
-        self._queue.put_nowait(write)
+        self._queue.put_nowait((run_id, write))
 
     def set_status(self, run_id: str, status: str) -> None:
         async def write(db: aiosqlite.Connection) -> None:
             await db.execute("UPDATE runs SET status = ? WHERE id = ?", (status, run_id))
 
-        self._queue.put_nowait(write)
+        self._queue.put_nowait((run_id, write))
 
     async def get_run(self, run_id: str) -> dict[str, Any] | None:
         cursor = await self.db.execute("SELECT * FROM runs WHERE id = ?", (run_id,))

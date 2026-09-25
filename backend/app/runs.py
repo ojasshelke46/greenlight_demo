@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
 from app.ledger import Ledger, utc_now
+from app.log import run_id_var
 from app.tools import merge_tool_call_deltas, resolve_tool_call
 from app.trueforge import TurnEvent, TurnHandle, TurnStreamGone
 
@@ -121,6 +122,7 @@ class RunManager:
         self.start(run_id, run["session_id"], run["turn_id"], await self._ledger.last_sequence(run_id), base)
 
     async def _pump(self, run_id: str, session_id: str, turn_id: str, live: LiveRun, base: int) -> None:
+        run_id_var.set(run_id)
         # Tool calls per model.message id; the live stream sends them as delta fragments.
         messages: dict[str, list[dict[str, Any]]] = {}
         pending = False
