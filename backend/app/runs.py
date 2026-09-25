@@ -19,6 +19,7 @@ class TrueForge(Protocol):
     async def get_agent_id(self, name: str | None = None) -> str: ...
     async def create_session(self, agent_id: str) -> str: ...
     async def start_turn(self, session_id: str, message: str) -> TurnHandle: ...
+    async def cancel(self, session_id: str) -> None: ...
     def stream_turn(
         self, session_id: str, turn_id: str, after_sequence: int | None = None
     ) -> AsyncIterator[TurnEvent]: ...
@@ -126,6 +127,7 @@ class RunManager:
         # Tool calls per model.message id; the live stream sends them as delta fragments.
         messages: dict[str, list[dict[str, Any]]] = {}
         pending = False
+        asked = False
         attempt = 0
         try:
             while True:
@@ -155,13 +157,17 @@ class RunManager:
                                 calls[:] = [json.loads(json.dumps(call)) for call in event["tool_calls"]]
                         elif event_type == "model.message.delta" and event.get("tool_calls"):
                             merge_tool_call_deltas(messages.setdefault(event["id"], []), event["tool_calls"])
+                        elif event_type == "tool.response_required":
+                            asked = True
                         elif event_type == "tool.approval_required":
                             pending = True
                             self._ledger.set_pending_action(run_id, _pending_action(turn_id, event, messages))
                         elif event_type == "turn.done":
                             live.finished = True
                             state = (event.get("state") or {}).get("status", "done")
-                            if not (pending and state == "done"):
+                            if asked and state == "done":
+                                self._ledger.set_status(run_id, "awaiting_input")
+                            elif not (pending and state == "done"):
                                 self._ledger.set_status(run_id, state)
                             return
                     return

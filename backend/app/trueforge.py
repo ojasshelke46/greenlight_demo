@@ -107,6 +107,10 @@ class TrueForgeClient:
         turn = body["data"]
         return TurnHandle(session_id=session_id, turn_id=turn["id"], status=turn["state"]["status"])
 
+    async def cancel(self, session_id: str) -> None:
+        """Cancel the session's running turn. TrueForge ends it with turn.done, reason client-cancelled."""
+        await self._request("POST", f"/sessions/{session_id}/cancel", json={})
+
     async def start_turn(self, session_id: str, message: str) -> TurnHandle:
         return await self._create_turn(session_id, [{"type": "user.message", "content": message}])
 

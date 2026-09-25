@@ -215,3 +215,18 @@ async def test_unknown_run_is_404():
         assert (await client.get("/runs/nope")).status_code == 404
         assert (await client.get("/runs/nope/ledger")).status_code == 404
         assert (await client.get("/runs/nope/events")).status_code == 404
+
+
+async def test_list_runs_newest_first():
+    async with api(FakeTrueForge()) as (client, app):
+        first = await start_run(client)
+        second = await start_run(client, mode="pr_only")
+        response = await client.get("/runs")
+        limited = await client.get("/runs", params={"limit": 1})
+
+    assert response.status_code == 200
+    runs = response.json()
+    assert [r["id"] for r in runs] == [second, first]
+    assert runs[0]["repo"] == "acme/widgets" and runs[0]["mode"] == "pr_only"
+    assert set(runs[0]) == {"id", "repo", "mode", "via_fork", "status", "created_at"}
+    assert len(limited.json()) == 1

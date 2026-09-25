@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sse_starlette import EventSourceResponse
 
@@ -20,6 +20,9 @@ router = APIRouter(tags=["runs"], dependencies=[Depends(require_api_key)])
 
 KEEPALIVE_SECONDS = 15
 RELEASE_CACHE_SECONDS = 2.0
+# A new turn in the same session keeps the agent's context; the original task carries the MODE.
+RESUME_PROMPT = "Continue the task from where you stopped. Keep the same repo and the same MODE."
+RESUMABLE_STATUSES = {"cancelled", "error"}
 
 
 class CreateRunRequest(BaseModel):
@@ -54,6 +57,11 @@ class ApprovalResponse(BaseModel):
     status: str
     # True when this call returned an earlier decision instead of making a new one.
     replayed: bool
+
+
+class RunControlResponse(BaseModel):
+    run_id: str
+    status: str
 
 
 class ReleaseResponse(BaseModel):
@@ -107,6 +115,21 @@ async def create_run(body: CreateRunRequest, request: Request) -> CreateRunRespo
     state.run_manager.start(run_id, session_id, turn_id)
 
     return CreateRunResponse(run_id=run_id, access=access)
+
+
+class RunSummary(BaseModel):
+    id: str
+    repo: str
+    mode: str
+    via_fork: bool
+    status: str
+    created_at: str
+
+
+@router.get("/runs", response_model=list[RunSummary])
+async def list_runs(request: Request, limit: int = Query(default=50, ge=1, le=200)) -> list[RunSummary]:
+    await request.app.state.ledger.flush()
+    return [RunSummary(**run) for run in await request.app.state.ledger.list_runs(limit)]
 
 
 @router.get("/runs/{run_id}", response_model=RunResponse)
@@ -253,3 +276,44 @@ async def get_release(run_id: str, request: Request) -> ReleaseResponse:
 
     manager.release_cache[run_id] = (time.monotonic() + RELEASE_CACHE_SECONDS, release)
     return ReleaseResponse(**release)
+
+
+@router.post("/runs/{run_id}/pause", response_model=RunControlResponse)
+async def pause_run(run_id: str, request: Request) -> RunControlResponse:
+    """Stop the agent now. TrueForge cancels the running turn; the stream then ends it with turn.done."""
+    state = request.app.state
+    await state.ledger.flush()
+    run = await _get_run(state.ledger, run_id)
+    if run["status"] != "running":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run is not running (status is {run['status']})")
+    try:
+        await state.trueforge_client.cancel(run["session_id"])
+    except (TrueForgeError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"TrueForge did not pause the run: {exc}") from exc
+    return RunControlResponse(run_id=run_id, status="pausing")
+
+
+@router.post("/runs/{run_id}/resume", response_model=RunControlResponse)
+async def resume_run(run_id: str, request: Request) -> RunControlResponse:
+    """Continue a paused or stopped run with a new turn in the same session.
+
+    Approvals never go through here: a run waiting on a merge must use POST /runs/{id}/approval.
+    """
+    state = request.app.state
+    ledger: Ledger = state.ledger
+    manager: RunManager = state.run_manager
+
+    async with manager.approval_lock(run_id):
+        await ledger.flush()
+        run = await _get_run(ledger, run_id)
+        if run["status"] not in RESUMABLE_STATUSES:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run cannot be resumed (status is {run['status']})")
+        try:
+            turn = await state.trueforge_client.start_turn(run["session_id"], RESUME_PROMPT)
+        except (TrueForgeError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"TrueForge did not resume the run: {exc}") from exc
+
+        base = await ledger.last_sequence(run_id)
+        await ledger.begin_turn(run_id, turn.turn_id, base)
+        manager.start(run_id, run["session_id"], turn.turn_id, after_sequence=base, base=base)
+        return RunControlResponse(run_id=run_id, status="running")

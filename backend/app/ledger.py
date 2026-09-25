@@ -253,6 +253,22 @@ class Ledger:
         row = await cursor.fetchone()
         return _run_row(row) if row else None
 
+    async def list_runs(self, limit: int) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            "SELECT id, repo, mode, via_fork, status, created_at FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)
+        )
+        return [
+            {
+                "id": row["id"],
+                "repo": row["repo"],
+                "mode": row["mode"],
+                "via_fork": bool(row["via_fork"]),
+                "status": row["status"],
+                "created_at": row["created_at"],
+            }
+            for row in await cursor.fetchall()
+        ]
+
     async def events_after(self, run_id: str, after: int) -> list[tuple[int, str]]:
         cursor = await self.db.execute(
             "SELECT sequence, payload_json FROM events WHERE run_id = ? AND sequence > ? ORDER BY sequence",
