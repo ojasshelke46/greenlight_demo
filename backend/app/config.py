@@ -5,6 +5,18 @@ from pydantic import field_validator
 from pydantic_core import PydanticUseDefault
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Role -> TrueForge agent name. Ids are resolved by name once at startup (app.agents.AgentRegistry).
+AGENTS: dict[str, str] = {
+    "fixer": "greenlight",
+    "prover": "greenlight-prover",
+    "policy": "greenlight-policy",
+    "scout": "greenlight-scout",
+    "receipt": "greenlight-receipt",
+    "auditor": "greenlight-auditor",
+}
+# Roles a user may start from the chat; the others are started by Greenlight itself.
+CHAT_ROLES = ("fixer", "scout", "policy")
+
 
 class Settings(BaseSettings):
     # env_ignore_empty: a blank line copied from .env.example means "unset", not "empty string".

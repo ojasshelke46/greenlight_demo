@@ -87,6 +87,22 @@ class TrueForgeClient:
                 return agent["id"]
         raise TrueForgeError(f"agent {name!r} not found")
 
+    async def list_agents(self) -> list[dict[str, Any]]:
+        """Every registry agent, following pagination."""
+        agents: list[dict[str, Any]] = []
+        params: dict[str, Any] = {"limit": 100}
+        while True:
+            body = await self._request("GET", "/agents", params=params)
+            agents += body["data"]
+            next_token = (body.get("pagination") or {}).get("next_page_token")
+            if not next_token:
+                return agents
+            params["page_token"] = next_token
+
+    async def get_agent(self, agent_id: str) -> dict[str, Any]:
+        """The agent as stored, including manifest.model.name."""
+        return (await self._request("GET", f"/agents/{agent_id}"))["data"]
+
     async def create_session(self, agent_id: str) -> str:
         # Sessions bind to an agent by name, not id, so resolve the name first.
         agent = await self._request("GET", f"/agents/{agent_id}")

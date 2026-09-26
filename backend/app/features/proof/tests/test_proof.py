@@ -152,14 +152,17 @@ def approve(client, run_id):
 async def test_endpoint_returns_every_advisory_for_the_run():
     async with api(FakeTrueForge(), github_state()) as (client, app):
         run_id = await paused_run(client, app)
-        assert (await client.get(f"/features/proof/{run_id}")).json() == []
+        assert (await client.get(f"/features/proof/{run_id}")).json() == {
+            "advisories": [],
+            "verification": {"status": "none", "provers": []},
+        }
 
         facts.record(run_id, [proof(R683, "before", "exploitable", "leaked"), proof(W7RC, "before", "not_reproduced", "no big body")])
         facts.record(run_id, [proof(R683, "after", "closed", "stripped")])
         response = await client.get(f"/features/proof/{run_id}")
 
     assert response.status_code == 200
-    assert response.json() == [
+    assert response.json()["advisories"] == [
         {
             "advisory": R683,
             "before": {"result": "exploitable", "evidence": "leaked"},
@@ -206,7 +209,7 @@ async def test_merge_goes_through_when_unproven():
         run_id = await paused_run(client, app)
         facts.record(run_id, [proof(R683, "before", "not_reproduced", "no redirect in sandbox"), proof(R683, "after", "closed")])
         response = await approve(client, run_id)
-        proofs = (await client.get(f"/features/proof/{run_id}")).json()
+        proofs = (await client.get(f"/features/proof/{run_id}")).json()["advisories"]
 
     assert response.status_code == 200, response.text
     assert len(fake.resumes) == 1

@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
 from app.auth import require_api_key
@@ -60,3 +60,15 @@ async def get_policy(repo: str = Query(...)) -> PolicyResponse:
         error=loaded.error,
         freeze=FreezeStatus(active=freeze is not None, ends_at=freeze.ends_at if freeze else None, until=freeze.until if freeze else None),
     )
+
+
+class DraftResponse(BaseModel):
+    run_id: str
+
+
+@router.post("/draft", response_model=DraftResponse, status_code=status.HTTP_201_CREATED)
+async def draft_policy(request: Request, repo: str = Query(...)) -> DraftResponse:
+    """Start the policy agent drafting a .greenlight.yml, for a repo that has no policy file yet."""
+    from app.routes.runs import start_policy_run
+
+    return DraftResponse(run_id=await start_policy_run(request.app.state.orchestrator, repo))

@@ -7,8 +7,8 @@ from typing import Any, Protocol
 from app import facts
 from app.ledger import Ledger, utc_now
 from app.log import run_id_var
-from app.markers import FactStream
-from app.tools import merge_tool_call_deltas, resolve_tool_call
+from app.markers import FactStream, message_text
+from app.tools import ResolvedToolCall, merge_tool_call_deltas, resolve_tool_call
 from app.trueforge import TurnEvent, TurnHandle, TurnStreamGone
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,14 @@ class TrueForge(Protocol):
     def stream_turn(
         self, session_id: str, turn_id: str, after_sequence: int | None = None
     ) -> AsyncIterator[TurnEvent]: ...
+
+
+class RunObserver(Protocol):
+    """Told about a run's stream as the pump sees it. Each method must return at once and never raise."""
+
+    def tool_calls(self, run_id: str, session_id: str) -> None: ...
+    def tool_response(self, run_id: str, call: ResolvedToolCall | None, event: dict[str, Any]) -> None: ...
+    def turn_done(self, run_id: str, status: str, final_text: str) -> None: ...
 
 
 class LiveRun:
@@ -59,6 +67,22 @@ class LiveRun:
         self._subscribers.discard(queue)
 
 
+def _find_call(messages: dict[str, list[dict[str, Any]]], tool_call_id: Any) -> ResolvedToolCall | None:
+    for calls in messages.values():
+        for call in calls:
+            if call.get("id") == tool_call_id:
+                return resolve_tool_call(call)
+    return None
+
+
+def _final_text(event: dict[str, Any], streamed: str) -> str:
+    """The agent's final message: turn.done's output when it carries one, else the last streamed message."""
+    output = (event.get("state") or {}).get("output")
+    if isinstance(output, dict):
+        output = output.get("content")
+    return message_text(output) or streamed
+
+
 def _pending_action(turn_id: str, event: dict[str, Any], messages: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     calls = []
     for ref in event.get("tool_calls", []):
@@ -86,9 +110,10 @@ def _pending_action(turn_id: str, event: dict[str, Any], messages: dict[str, lis
 
 
 class RunManager:
-    def __init__(self, ledger: Ledger, trueforge: TrueForge) -> None:
+    def __init__(self, ledger: Ledger, trueforge: TrueForge, observer: RunObserver | None = None) -> None:
         self._ledger = ledger
         self._trueforge = trueforge
+        self.observer = observer
         self._live: dict[str, LiveRun] = {}
         self._pumps: dict[str, asyncio.Task[None]] = {}
         self._approval_locks: dict[str, asyncio.Lock] = {}
@@ -103,6 +128,28 @@ class RunManager:
         for task in self._pumps.values():
             task.cancel()
         await asyncio.gather(*self._pumps.values(), return_exceptions=True)
+
+    def pump_task(self, run_id: str) -> asyncio.Task[None] | None:
+        """The run's pump while it is consuming TrueForge events; None once it has stopped."""
+        return self._pumps.get(run_id)
+
+    async def resume_active(self) -> None:
+        """Restart the pump of every active run, e.g. at startup, so no run waits for a browser to connect."""
+        cursor = await self._ledger.db.execute(
+            f"SELECT id FROM runs WHERE status IN ({', '.join('?' * len(ACTIVE_STATUSES))})", tuple(ACTIVE_STATUSES)
+        )
+        for (run_id,) in await cursor.fetchall():
+            run = await self._ledger.get_run(run_id)
+            if run is not None:
+                await self.ensure_pump(run)
+
+    def _notify(self, method: str, *args: Any) -> None:
+        if self.observer is None:
+            return
+        try:
+            getattr(self.observer, method)(*args)
+        except Exception:
+            logger.exception("Run observer %s failed", method)
 
     def start(self, run_id: str, session_id: str, turn_id: str, after_sequence: int = 0, base: int = 0) -> None:
         """Pump a turn into the run. Its events are numbered base + TrueForge sequence in the run."""
@@ -129,6 +176,9 @@ class RunManager:
         fact_stream = FactStream()
         # Tool calls per model.message id; the live stream sends them as delta fragments.
         messages: dict[str, list[dict[str, Any]]] = {}
+        # Text of each model.message by id, and the id of the latest one with text: the final message.
+        texts: dict[str, str] = {}
+        last_text_id: str | None = None
         pending = False
         asked = False
         attempt = 0
@@ -161,8 +211,18 @@ class RunManager:
                             calls = messages.setdefault(event["id"], [])
                             if event.get("tool_calls"):
                                 calls[:] = [json.loads(json.dumps(call)) for call in event["tool_calls"]]
-                        elif event_type == "model.message.delta" and event.get("tool_calls"):
-                            merge_tool_call_deltas(messages.setdefault(event["id"], []), event["tool_calls"])
+                                self._notify("tool_calls", run_id, session_id)
+                            if text := message_text(event.get("content")):
+                                texts[event["id"]], last_text_id = text, event["id"]
+                        elif event_type == "model.message.delta":
+                            if event.get("tool_calls"):
+                                merge_tool_call_deltas(messages.setdefault(event["id"], []), event["tool_calls"])
+                                self._notify("tool_calls", run_id, session_id)
+                            if isinstance(event.get("content"), str) and event["content"]:
+                                texts[event["id"]] = texts.get(event["id"], "") + event["content"]
+                                last_text_id = event["id"]
+                        elif event_type == "tool.response":
+                            self._notify("tool_response", run_id, _find_call(messages, event.get("tool_call_id")), event)
                         elif event_type == "tool.response_required":
                             asked = True
                         elif event_type == "tool.approval_required":
@@ -172,9 +232,14 @@ class RunManager:
                             live.finished = True
                             state = (event.get("state") or {}).get("status", "done")
                             if asked and state == "done":
-                                self._ledger.set_status(run_id, "awaiting_input")
-                            elif not (pending and state == "done"):
-                                self._ledger.set_status(run_id, state)
+                                final = "awaiting_input"
+                            elif pending and state == "done":
+                                final = "awaiting_approval"
+                            else:
+                                final = state
+                            if final != "awaiting_approval":
+                                self._ledger.set_status(run_id, final)
+                            self._notify("turn_done", run_id, final, _final_text(event, texts.get(last_text_id or "", "")))
                             return
                     return
                 except asyncio.CancelledError:

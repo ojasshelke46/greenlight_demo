@@ -306,7 +306,8 @@ async def test_run_message_carries_the_majors_policy():
     fake = RecordingTrueForge()
     async with api(GitHub("allow_major_upgrades: false\n"), fake) as (client, app):
         await paused_run(client, app)
-    assert fake.messages[0].endswith("MODE: ship\n\nPOLICY: allow_major_upgrades=false")
+    assert fake.messages[0].endswith("\n\nPOLICY: allow_major_upgrades=false")
+    assert "MODE: ship\n\n" in fake.messages[0]
 
 
 async def test_two_approvers_through_the_approval_endpoint():

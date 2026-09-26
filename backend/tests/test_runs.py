@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from app.config import get_settings
 from app.github import GitHubClient
 from app.main import create_app
+from app.orchestrator import FIXER_INSTRUCTIONS
 from app.runs import RunManager
 from app.trueforge import TurnEvent, TurnHandle
 
@@ -135,8 +136,12 @@ async def test_pr_only_run_starts_agent_with_mode_prompt():
     assert body["access"]["via_fork"] is True
     assert body["access"]["mode_options"] == ["pr_only"]
     assert fake.turns == [
-        ("sess_1", "Check https://github.com/acme/widgets for vulnerable packages and fix them.\nMODE: pr_only")
+        (
+            "sess_1",
+            f"Check https://github.com/acme/widgets for vulnerable packages and fix them.\nMODE: pr_only\n\n{FIXER_INSTRUCTIONS}",
+        )
     ]
+    assert body["role"] == "fixer"
 
 
 async def test_events_stream_in_order_unchanged_and_persisted():
@@ -228,5 +233,6 @@ async def test_list_runs_newest_first():
     runs = response.json()
     assert [r["id"] for r in runs] == [second, first]
     assert runs[0]["repo"] == "acme/widgets" and runs[0]["mode"] == "pr_only"
-    assert set(runs[0]) == {"id", "repo", "mode", "via_fork", "status", "created_at"}
+    assert set(runs[0]) == {"id", "repo", "mode", "via_fork", "status", "created_at", "role"}
+    assert runs[0]["role"] == "fixer"
     assert len(limited.json()) == 1

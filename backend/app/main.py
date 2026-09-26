@@ -7,8 +7,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app import facts
+from app import facts, orchestrator
 from app import features  # noqa: F401  Runs each feature's __init__ so its hooks are registered.
+from app.agents import AgentRegistry
 from app.config import get_settings
 from app.github import GitHubClient
 from app.ledger import Ledger
@@ -36,11 +37,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await ledger.init()
         await facts.init(ledger.db, ledger.write_lock)
         app.state.ledger = ledger
-        app.state.run_manager = RunManager(ledger, app.state.trueforge_client)
+
+        # Agent ids are resolved by name once here; a role TrueForge lacks is retried when it is next used.
+        app.state.agents = AgentRegistry()
+        await app.state.agents.resolve(app.state.trueforge_client)
+        app.state.orchestrator = orchestrator.Orchestrator(app, app.state.agents)
+        orchestrator.bind(app.state.orchestrator)
+        app.state.run_manager = RunManager(ledger, app.state.trueforge_client, observer=app.state.orchestrator)
+        # Runs that were active when the backend stopped carry on now, whether or not a browser is watching.
+        await app.state.run_manager.resume_active()
 
         try:
             yield
         finally:
+            orchestrator.bind(None)
+            await app.state.orchestrator.close()
             await app.state.run_manager.close()
             await facts.close()
             await ledger.close()

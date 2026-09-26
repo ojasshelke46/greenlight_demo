@@ -1,5 +1,4 @@
 import time
-import uuid
 from collections.abc import AsyncIterator
 from dataclasses import asdict
 from typing import Any, Literal
@@ -20,9 +19,15 @@ from app.approvals import (
     load_pending,
 )
 from app.auth import require_api_key
+from app.config import CHAT_ROLES
+from app.features.fleet.models import FleetSummary, scout_board
+from app.features.fleet.scan import InvalidTarget, Target, parse_target
+from app.features.policy.loader import load_policy
+from app.github import InvalidRepoUrl, parse_repo
 from app.hooks import Deny, NeedMore, build_run_message_extras, run_approval_checks
 from app.ledger import Ledger
 from app.log import run_id_var
+from app.orchestrator import CHILD_MODE, FIXER_INSTRUCTIONS, Orchestrator
 from app.routes.access import AccessResponse, resolve_access
 from app.runs import RunManager
 from app.trueforge import TrueForgeError
@@ -37,13 +42,19 @@ RESUMABLE_STATUSES = {"cancelled", "error"}
 
 
 class CreateRunRequest(BaseModel):
-    repo: str
-    mode: Literal["ship", "pr_only"]
+    # fixer needs repo and mode, policy needs repo, scout needs target.
+    role: str = "fixer"
+    repo: str | None = None
+    mode: Literal["ship", "pr_only"] | None = None
+    # org:<name>, user:<name>, or comma separated repo URLs.
+    target: str | None = None
 
 
 class CreateRunResponse(BaseModel):
     run_id: str
-    access: AccessResponse
+    role: str
+    # Only for fixer runs.
+    access: AccessResponse | None
 
 
 class RunResponse(BaseModel):
@@ -53,6 +64,17 @@ class RunResponse(BaseModel):
     mode: str
     via_fork: bool
     pending_action: dict[str, Any] | None
+    role: str
+    parent_run_id: str | None
+
+
+class ChildRun(BaseModel):
+    run_id: str
+    role: str
+    purpose: str | None
+    status: str
+    created_at: str
+    result: dict[str, Any] | None
 
 
 class ApprovalRequest(BaseModel):
@@ -89,6 +111,42 @@ def build_prompt(repo: str, mode: str) -> str:
     return f"Check https://github.com/{repo} for vulnerable packages and fix them.\nMODE: {mode}"
 
 
+def scout_prompt(target: Target) -> str:
+    if target.kind == "repos":
+        return "Scan these repos: " + ", ".join(f"https://github.com/{owner}/{name}" for owner, name in target.repos)
+    return f"Scan every repo in the GitHub {target.kind} {target.name}"
+
+
+def policy_prompt(repo: str) -> str:
+    return f"Draft a .greenlight.yml for https://github.com/{repo}"
+
+
+def _bad_request(detail: str) -> HTTPException:
+    return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
+
+
+async def _start(orchestrator: Orchestrator, role: str, repo: str, mode: str, message: str, via_fork: bool = False) -> str:
+    try:
+        return await orchestrator.start_run(role, repo, mode, message, via_fork=via_fork)
+    except (TrueForgeError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not start the TrueForge agent: {exc}") from exc
+
+
+async def start_policy_run(orchestrator: Orchestrator, repo_url: str) -> str:
+    """A top level policy run drafting .greenlight.yml; only for a repo that has no policy file."""
+    try:
+        owner, name = parse_repo(repo_url)
+    except InvalidRepoUrl as exc:
+        raise _bad_request(str(exc)) from exc
+    loaded = await load_policy(owner, name)
+    if loaded.exists:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"{owner}/{name} already has {loaded.path}")
+    if loaded.error is not None:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=loaded.error)
+    repo = f"{owner}/{name}"
+    return await _start(orchestrator, "policy", repo, CHILD_MODE, policy_prompt(repo))
+
+
 async def _get_run(ledger: Ledger, run_id: str) -> dict[str, Any]:
     run = await ledger.get_run(run_id)
     if run is None:
@@ -99,6 +157,27 @@ async def _get_run(ledger: Ledger, run_id: str) -> dict[str, Any]:
 @router.post("/runs", response_model=CreateRunResponse, status_code=status.HTTP_201_CREATED)
 async def create_run(body: CreateRunRequest, request: Request) -> CreateRunResponse:
     state = request.app.state
+    orchestrator: Orchestrator = state.orchestrator
+    if body.role not in CHAT_ROLES:
+        raise _bad_request(f"Role {body.role} cannot be started from the chat. Use one of: {', '.join(CHAT_ROLES)}")
+
+    if body.role == "scout":
+        if not body.target:
+            raise _bad_request("A scout run needs a target: org:<name>, user:<name>, or repo URLs")
+        try:
+            target = parse_target(body.target)
+        except InvalidTarget as exc:
+            raise _bad_request(str(exc)) from exc
+        run_id = await _start(orchestrator, "scout", target.key, CHILD_MODE, scout_prompt(target))
+        return CreateRunResponse(run_id=run_id, role="scout", access=None)
+
+    if body.role == "policy":
+        if not body.repo:
+            raise _bad_request("A policy run needs a repo")
+        return CreateRunResponse(run_id=await start_policy_run(orchestrator, body.repo), role="policy", access=None)
+
+    if not body.repo or not body.mode:
+        raise _bad_request("A fixer run needs a repo and a mode")
     access = await resolve_access(state.github_client, body.repo)
 
     if body.mode not in access.mode_options:
@@ -108,32 +187,14 @@ async def create_run(body: CreateRunRequest, request: Request) -> CreateRunRespo
         )
 
     owner, name = access.repo.split("/", 1)
-    message = build_prompt(access.repo, body.mode)
+    message = f"{build_prompt(access.repo, body.mode)}\n\n{FIXER_INSTRUCTIONS}"
     extras = await build_run_message_extras(owner, name)
     if extras:
         message = f"{message}\n\n{extras}"
 
-    trueforge = state.trueforge_client
-    try:
-        session_id = await trueforge.create_session(await trueforge.get_agent_id())
-        turn = await trueforge.start_turn(session_id, message)
-    except (TrueForgeError, httpx.HTTPError) as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not start the TrueForge agent: {exc}") from exc
-    turn_id = turn.turn_id
-
-    run_id = str(uuid.uuid4())
+    run_id = await _start(orchestrator, "fixer", access.repo, body.mode, message, via_fork=access.via_fork)
     run_id_var.set(run_id)
-    await state.ledger.create_run(
-        run_id=run_id,
-        repo=access.repo,
-        mode=body.mode,
-        via_fork=access.via_fork,
-        session_id=session_id,
-        turn_id=turn_id,
-    )
-    state.run_manager.start(run_id, session_id, turn_id)
-
-    return CreateRunResponse(run_id=run_id, access=access)
+    return CreateRunResponse(run_id=run_id, role="fixer", access=access)
 
 
 class RunSummary(BaseModel):
@@ -143,18 +204,46 @@ class RunSummary(BaseModel):
     via_fork: bool
     status: str
     created_at: str
+    role: str
 
 
 @router.get("/runs", response_model=list[RunSummary])
 async def list_runs(request: Request, limit: int = Query(default=50, ge=1, le=200)) -> list[RunSummary]:
+    """Top level runs only; a run's helper agent runs are at /runs/{id}/children."""
     await request.app.state.ledger.flush()
-    return [RunSummary(**run) for run in await request.app.state.ledger.list_runs(limit)]
+    return [RunSummary(**run) for run in await request.app.state.orchestrator.list_top_level(limit)]
 
 
 @router.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(run_id: str, request: Request) -> RunResponse:
     run = await _get_run(request.app.state.ledger, run_id)
-    return RunResponse(**run)
+    role, parent_run_id = await request.app.state.orchestrator.meta(run_id)
+    return RunResponse(**run, role=role, parent_run_id=parent_run_id)
+
+
+@router.get("/runs/{run_id}/children", response_model=list[ChildRun])
+async def list_children(run_id: str, request: Request) -> list[ChildRun]:
+    await request.app.state.ledger.flush()
+    await _get_run(request.app.state.ledger, run_id)
+    return [ChildRun(**child) for child in await request.app.state.orchestrator.children(run_id)]
+
+
+@router.get("/runs/{run_id}/scout", response_model=FleetSummary)
+async def get_scout_board(run_id: str, request: Request) -> FleetSummary:
+    """The scout agent's ranked board, as fleet rows."""
+    state = request.app.state
+    await state.ledger.flush()
+    run = await _get_run(state.ledger, run_id)
+    orchestrator: Orchestrator = state.orchestrator
+    role, _ = await orchestrator.meta(run_id)
+    if role != "scout":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run {run_id} is a {role} run, not a scout run")
+    result = await orchestrator.result(run_id, "scout")
+    if result is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"The scout has no result yet (status is {run['status']})")
+    if result.get("parse_error"):
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="The scout's reply had no readable json board")
+    return scout_board(run["repo"], result)
 
 
 @router.get("/runs/{run_id}/ledger")

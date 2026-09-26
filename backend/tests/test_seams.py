@@ -15,6 +15,7 @@ from app.hooks import (
 )
 from app.ledger import Ledger
 from app.markers import FactStream, extract_facts, message_text
+from app.orchestrator import FIXER_INSTRUCTIONS
 from tests.test_approval import FakeTrueForge, api, approvals, github_state, paused_run, wait_for_status
 
 CTX = ApprovalContext(
@@ -283,14 +284,16 @@ async def test_run_message_includes_registered_extras(parts):
 
     [message] = fake.messages
     assert message.startswith("Check https://github.com/acme/widgets")
-    assert message.endswith("MODE: ship\n\nFLEET: acme/widgets is one of 3 repos")
+    assert message.endswith(f"MODE: ship\n\n{FIXER_INSTRUCTIONS}\n\nFLEET: acme/widgets is one of 3 repos")
 
 
 async def test_run_message_unchanged_without_extras(parts):
     fake = RecordingTrueForge()
     async with api(fake, github_state()) as (client, app):
         await paused_run(client, app)
-    assert fake.messages == ["Check https://github.com/acme/widgets for vulnerable packages and fix them.\nMODE: ship"]
+    assert fake.messages == [
+        f"Check https://github.com/acme/widgets for vulnerable packages and fix them.\nMODE: ship\n\n{FIXER_INSTRUCTIONS}"
+    ]
 
 
 async def test_stream_stores_facts_from_agent_messages():

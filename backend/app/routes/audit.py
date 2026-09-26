@@ -2,6 +2,7 @@ import json
 from datetime import datetime
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, Response
 
@@ -10,6 +11,7 @@ from app.chain import PRE_FLIGHT_RECORDER, export_document, load_run
 from app.config import get_settings
 from app.event_types import NOTE_RECEIPT
 from app.tools import merge_tool_call_deltas, resolve_tool_call
+from app.trueforge import TrueForgeError
 
 router = APIRouter(tags=["audit"], dependencies=[Depends(require_api_key)])
 
@@ -36,6 +38,53 @@ async def export(run_id: str, request: Request, format: Literal["md", "json"] = 
     if format == "json":
         return JSONResponse(export_document(snapshot), headers=headers)
     return Response(render_markdown(snapshot), media_type="text/markdown; charset=utf-8", headers=headers)
+
+
+def auditor_input(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The export plus the server's verify result, for the auditor agent.
+
+    Chain entries are listed without their source rows, and events are folded into the tool call timeline:
+    a run streams thousands of model.message.delta events, far more than a model should read. The hashes and
+    chain_verified are the server's; the auditor never checks or changes anything itself.
+    """
+    document = export_document(snapshot)
+    document["entries"] = [
+        {key: entry[key] for key in ("idx", "kind", "ref_id", "prev_hash", "entry_hash", "created_at")}
+        for entry in snapshot["entries"]
+    ]
+    verify = snapshot["verify"]
+    return {
+        **document,
+        "chain_verified": verify["ok"],
+        "verify": verify,
+        "tool_calls": _tool_calls(snapshot["events"]),
+        "approvals": [
+            {
+                "tool_name": approval["tool_name"],
+                "arguments": json.loads(approval["arguments_json"]) if approval["arguments_json"] else None,
+                "decision": approval["decision"],
+                "approver": approval["approver"],
+                "decided_at": approval["decided_at"],
+                "result": approval["result"],
+            }
+            for approval in snapshot["approvals"]
+        ],
+        "notes": [
+            {"kind": note["kind"], "payload": json.loads(note["payload_json"]), "created_at": note["created_at"]}
+            for note in snapshot["notes"]
+        ],
+    }
+
+
+@router.post("/runs/{run_id}/audit/report", status_code=status.HTTP_201_CREATED)
+async def audit_report(run_id: str, request: Request) -> dict[str, str]:
+    """Start the auditor agent on this run's export and verify result. Returns the auditor's child run id."""
+    report = auditor_input(await _snapshot(run_id, request))
+    try:
+        child_run_id = await request.app.state.orchestrator.start_auditor(run_id, report)
+    except (TrueForgeError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not start the auditor: {exc}") from exc
+    return {"run_id": child_run_id}
 
 
 # Markdown report

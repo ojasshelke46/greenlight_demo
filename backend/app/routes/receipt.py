@@ -6,6 +6,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from app import orchestrator
 from app.auth import require_api_key
 from app.config import get_settings
 from app.event_types import NOTE_RECEIPT
@@ -38,20 +39,26 @@ def _state(app: FastAPI) -> _ReceiptState:
 
 @router.get("/runs/{run_id}/receipt")
 async def get_receipt(run_id: str, request: Request) -> JSONResponse:
-    state = _state(request.app)
-    cached = state.cache.get(run_id)
-    if cached is not None and cached[0] > clock():
-        return JSONResponse(cached[2], status_code=cached[1])
-
-    # One computation per run at a time, so a settled receipt is appended exactly once.
-    async with state.locks.setdefault(run_id, asyncio.Lock()):
-        status_code, body = await _resolve(run_id, request, state)
-    state.cache[run_id] = (clock() + CACHE_SECONDS, status_code, body)
+    status_code, body = await compute_receipt(request.app, run_id)
     return JSONResponse(body, status_code=status_code)
 
 
-async def _resolve(run_id: str, request: Request, state: _ReceiptState) -> tuple[int, dict[str, Any]]:
-    app_state = request.app.state
+async def compute_receipt(app: FastAPI, run_id: str) -> tuple[int, dict[str, Any]]:
+    """The receipt as (status code, body). Shared by the route and the backend's own settle loop."""
+    state = _state(app)
+    cached = state.cache.get(run_id)
+    if cached is not None and cached[0] > clock():
+        return cached[1], cached[2]
+
+    # One computation per run at a time, so a settled receipt is appended exactly once.
+    async with state.locks.setdefault(run_id, asyncio.Lock()):
+        status_code, body = await _resolve(run_id, app, state)
+    state.cache[run_id] = (clock() + CACHE_SECONDS, status_code, body)
+    return status_code, body
+
+
+async def _resolve(run_id: str, app: FastAPI, state: _ReceiptState) -> tuple[int, dict[str, Any]]:
+    app_state = app.state
     ledger = app_state.ledger
     settings = get_settings()
 
@@ -78,4 +85,6 @@ async def _resolve(run_id: str, request: Request, state: _ReceiptState) -> tuple
     body = receipt.model_dump(mode="json")
     await ledger.append_note(run_id, NOTE_RECEIPT, body)
     state.first_attempt.pop(run_id, None)
+    if (running := orchestrator.current()) is not None:
+        running.receipt_stored(run_id, body)
     return 200, body

@@ -11,4 +11,15 @@ async def test_health_reports_ok_when_trueforge_unreachable():
             response = await client.get("/health")
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "trueforge_reachable": False}
+    assert response.json() == {
+        "ok": True,
+        "trueforge_reachable": False,
+        "agents": {
+            "fixer": {"name": "greenlight", "found": False},
+            "prover": {"name": "greenlight-prover", "found": False},
+            "policy": {"name": "greenlight-policy", "found": False},
+            "scout": {"name": "greenlight-scout", "found": False},
+            "receipt": {"name": "greenlight-receipt", "found": False},
+            "auditor": {"name": "greenlight-auditor", "found": False},
+        },
+    }
