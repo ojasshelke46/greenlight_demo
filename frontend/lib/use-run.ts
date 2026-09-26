@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, controlRun, fetchAcceptedDecision, fetchRelease } from "./api";
+import { ApiError, controlRun, fetchAcceptedDecision, fetchRelease, sendMessage } from "./api";
 import type { ApprovalResult } from "./features/approval";
 import { RunModel } from "./run-model";
 import type { ApprovalState, Release, RunMeta, RunState } from "./state";
@@ -158,6 +158,23 @@ export function useRun() {
     }
   }, [connect]);
 
+  /** Say something to the agent: a new turn in the same session, or the answer to its question. */
+  const say = useCallback(
+    async (text: string): Promise<string | null> => {
+      const m = model.current;
+      if (!m) return null;
+      try {
+        await sendMessage(m.meta.id, text);
+        pausingRef.current = false;
+        connect(m.meta.id, m.lastSequence);
+        return null;
+      } catch (error) {
+        return error instanceof ApiError ? error.message : "Could not reach the agent";
+      }
+    },
+    [connect],
+  );
+
   const reset = useCallback(() => {
     close();
     model.current = null;
@@ -195,5 +212,5 @@ export function useRun() {
     [close],
   );
 
-  return { run, open, decide, pause, resume, reset };
+  return { run, open, decide, pause, resume, say, reset };
 }

@@ -221,6 +221,8 @@ export class RunModel {
   lastSequence = 0;
 
   private messages = new Map<string, Message>();
+  // What the user sent to open each later turn, keyed "user:<turn id>" and kept in this.order with the messages.
+  private userInputs = new Map<string, { at: number; text: string; answer: boolean }>();
   private order: string[] = [];
   private responses = new Map<string, ToolResponse>();
   private sandboxAt: number | null = null;
@@ -232,6 +234,7 @@ export class RunModel {
   // Sequence of the latest turn.done seen, kept across resumes to spot calls a past turn abandoned.
   private lastTurnDoneSeq = 0;
   private factStream = new FactStream();
+  private prFact: { url: string; number: number | null; viaFork: boolean; at: number } | null = null;
   private features: FeaturesState = initialFeaturesState;
 
   constructor(meta: RunMeta) {
@@ -248,6 +251,19 @@ export class RunModel {
     switch (type) {
       case "turn.created":
         this.turnsStarted += 1;
+        // The first turn's input is the task, shown as the request; later turns carry what the user said next.
+        if (this.turnsStarted > 1 && Array.isArray(event.input)) {
+          const said = event.input.map(asObject).filter((item): item is Json => item !== null);
+          const text = said
+            .map((item) => (item.type === "user.message" || item.type === "user.tool_response" ? str(item.content) : null))
+            .filter((t): t is string => Boolean(t))
+            .join("\n");
+          const key = `user:${str(event.turn_id) ?? id}`;
+          if (text && !this.userInputs.has(key)) {
+            this.userInputs.set(key, { at, text, answer: said.some((item) => item.type === "user.tool_response") });
+            this.order.push(key);
+          }
+        }
         this.startedAt ??= at;
         this.turnEnd = null;
         this.pendingRefs = null;
@@ -306,7 +322,15 @@ export class RunModel {
       }
     }
 
-    this.features = featuresReducer(this.features, { sequence, event, facts: this.factStream.feed(event) });
+    const found = this.factStream.feed(event);
+    // The agent's own report of the PR it opened; used when no create_pull_request response carried one.
+    for (const fact of found) {
+      if (fact.kind === "pr" && typeof fact.url === "string" && /\/pull\/\d+/.test(fact.url) && !this.prFact) {
+        const number = typeof fact.number === "number" ? fact.number : Number(fact.url.split("/").pop());
+        this.prFact = { url: fact.url, number: Number.isFinite(number) ? number : null, viaFork: fact.via_fork === true, at };
+      }
+    }
+    this.features = featuresReducer(this.features, { sequence, event, facts: found });
   }
 
   private message(id: string, seq: number, at: number): Message {
@@ -345,7 +369,7 @@ export class RunModel {
     const ref = this.questionRefs?.[0];
     if (!ref || this.turnEnd?.status !== "done") return null;
     for (const id of this.order) {
-      const call = this.messages.get(id)!.toolCalls.find((c) => c.id === ref);
+      const call = this.messages.get(id)?.toolCalls.find((c) => c.id === ref);
       if (!call) continue;
       const input = resolveToolCall(call).input ?? {};
       const options = Array.isArray(input.options) ? input.options.filter((o): o is string => typeof o === "string") : [];
@@ -362,7 +386,7 @@ export class RunModel {
     const ref = this.pendingRefs?.[0];
     if (!ref) return null;
     for (const id of this.order) {
-      const call = this.messages.get(id)!.toolCalls.find((c) => c.id === ref);
+      const call = this.messages.get(id)?.toolCalls.find((c) => c.id === ref);
       if (!call) continue;
       const resolved = resolveToolCall(call);
       const pullNumber = typeof resolved.input?.pullNumber === "number" ? resolved.input.pullNumber : null;
@@ -397,6 +421,12 @@ export class RunModel {
     let pushedFiles: string[] = [];
 
     for (const messageId of this.order) {
+      const input = this.userInputs.get(messageId);
+      if (input) {
+        blocks.push({ kind: "user", id: messageId, text: input.text, answer: input.answer, at: input.at });
+        terminal = null;
+        continue;
+      }
       const message = this.messages.get(messageId)!;
       const firstBlock = blocks.length;
       const text = message.content.trim();
@@ -550,6 +580,13 @@ export class RunModel {
       for (let i = firstBlock; i < blocks.length; i++) blocks[i].at ??= message.at;
     }
 
+    // A PR counts as opened from either source: the create_pull_request response above, or a "pr" fact.
+    if (!pr && this.prFact) {
+      pr = { number: this.prFact.number, url: this.prFact.url, title: null, branch: null, base: null, fromFork: this.prFact.viaFork };
+      set("pull_request", { status: "done", detail: pr.number !== null ? `#${pr.number} open` : "Opened", endedAt: this.prFact.at });
+      blocks.push({ kind: "pr", id: "fact:pr", pr, at: this.prFact.at });
+    }
+
     // Steps
     const canShip = this.meta.mode === "ship" && !this.meta.viaFork;
     const started = this.turnsStarted > 0;
@@ -631,7 +668,8 @@ export class RunModel {
         ? { tone: "progress", working: false, label: "Paused", detail: "You paused the agent" }
         : this.status({ approval, pending, release, merged, current, prOpen: pr !== null });
     if (pausing && !this.turnEnd) status = { tone: "progress", working: false, label: "Pausing", detail: "Waiting for the agent to stop" };
-    const canResume = this.turnEnd !== null && (this.turnEnd.status === "cancelled" || this.turnEnd.status === "error") && !merged;
+    // Any ended turn can continue in the same session, unless it waits on the user (a merge decision, a question).
+    const canResume = this.turnEnd !== null && !this.paused && !merged;
 
     const approvalContext: ApprovalContext | null = pending
       ? {

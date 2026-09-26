@@ -153,6 +153,13 @@ export async function fetchHealth(): Promise<{ ok: boolean; trueforge: boolean }
   return { ok: body.ok, trueforge: body.trueforge_reachable };
 }
 
+/** Says something to the run's agent in the same session, or answers the question it asked. */
+export async function sendMessage(runId: string, text: string): Promise<{ run_id: string; status: string }> {
+  return json(
+    await fetch(`/api/runs/${encodeURIComponent(runId)}/message`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }) }),
+  );
+}
+
 export async function controlRun(runId: string, action: "pause" | "resume"): Promise<{ run_id: string; status: string }> {
   return json(
     await fetch(`/api/${action}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId }) }),

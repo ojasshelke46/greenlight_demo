@@ -1,3 +1,4 @@
+import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import asdict
@@ -29,6 +30,7 @@ from app.ledger import Ledger
 from app.log import run_id_var
 from app.orchestrator import CHILD_MODE, FIXER_INSTRUCTIONS, Orchestrator
 from app.routes.access import AccessResponse, resolve_access
+from app.routes.receipt import forget_receipt
 from app.runs import RunManager
 from app.trueforge import TrueForgeError
 
@@ -36,9 +38,17 @@ router = APIRouter(tags=["runs"], dependencies=[Depends(require_api_key)])
 
 KEEPALIVE_SECONDS = 15
 RELEASE_CACHE_SECONDS = 2.0
-# A new turn in the same session keeps the agent's context; the original task carries the MODE.
-RESUME_PROMPT = "Continue the task from where you stopped. Keep the same repo and the same MODE."
-RESUMABLE_STATUSES = {"cancelled", "error"}
+# A new turn in the same session keeps the agent's context and its sandbox; the original task carries the MODE.
+RESUME_PROMPT = (
+    "Continue the task from where you stopped. Do not redo steps that already succeeded: pick up at the step that "
+    "failed or was not finished. If the sandbox was reset or is unavailable, set up only what that step needs again "
+    "(clone the repo, install Node.js and dependencies, reapply your earlier changes), then carry on. "
+    "Keep the same repo and the same MODE."
+)
+# A run that ended, however it ended, can take another turn in the same session. resume_failed is left out:
+# its turn still waits on an approval that only POST /runs/{id}/approval may answer.
+RESUMABLE_STATUSES = {"cancelled", "error", "done"}
+MAX_MESSAGE_LENGTH = 8000
 
 
 class CreateRunRequest(BaseModel):
@@ -66,6 +76,13 @@ class RunResponse(BaseModel):
     pending_action: dict[str, Any] | None
     role: str
     parent_run_id: str | None
+    # The PR the run opened, from create_pull_request or a "pr" fact, recorded once. via_fork above is the run's
+    # access (whether it has to work through a fork); pr_via_fork is how this PR was actually opened.
+    pr_url: str | None
+    pr_number: int | None
+    pr_via_fork: bool | None
+    # A fix run that ended without opening a PR by either route.
+    stopped_without_pr: bool
 
 
 class ChildRun(BaseModel):
@@ -97,6 +114,10 @@ class ApprovalResponse(BaseModel):
 class RunControlResponse(BaseModel):
     run_id: str
     status: str
+
+
+class MessageRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=MAX_MESSAGE_LENGTH)
 
 
 class ReleaseResponse(BaseModel):
@@ -216,9 +237,21 @@ async def list_runs(request: Request, limit: int = Query(default=50, ge=1, le=20
 
 @router.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(run_id: str, request: Request) -> RunResponse:
-    run = await _get_run(request.app.state.ledger, run_id)
-    role, parent_run_id = await request.app.state.orchestrator.meta(run_id)
-    return RunResponse(**run, role=role, parent_run_id=parent_run_id)
+    ledger: Ledger = request.app.state.ledger
+    orchestrator: Orchestrator = request.app.state.orchestrator
+    await ledger.flush()
+    run = await _get_run(ledger, run_id)
+    role, parent_run_id = await orchestrator.meta(run_id)
+    pr = await orchestrator.pr(run_id)
+    return RunResponse(
+        **run,
+        role=role,
+        parent_run_id=parent_run_id,
+        pr_url=pr["url"] if pr else None,
+        pr_number=pr.get("number") if pr else None,
+        pr_via_fork=pr.get("via_fork") if pr else None,
+        stopped_without_pr=role == "fixer" and parent_run_id is None and run["status"] == "done" and pr is None,
+    )
 
 
 @router.get("/runs/{run_id}/children", response_model=list[ChildRun])
@@ -428,27 +461,70 @@ async def pause_run(run_id: str, request: Request) -> RunControlResponse:
     return RunControlResponse(run_id=run_id, status="pausing")
 
 
-@router.post("/runs/{run_id}/resume", response_model=RunControlResponse)
-async def resume_run(run_id: str, request: Request) -> RunControlResponse:
-    """Continue a paused or stopped run with a new turn in the same session.
+async def _pending_question(ledger: Ledger, run: dict[str, Any]) -> tuple[str, list[str]]:
+    """(thread_id, tool_call_ids) of the question the current turn paused on, from the ledger."""
+    base = await ledger.turn_base(run["id"], run["turn_id"])
+    cursor = await ledger.db.execute(
+        "SELECT payload_json FROM events WHERE run_id = ? AND type = 'tool.response_required' AND sequence > ?"
+        " ORDER BY sequence DESC LIMIT 1",
+        (run["id"], base),
+    )
+    row = await cursor.fetchone()
+    event = json.loads(row["payload_json"]) if row else {}
+    ids = [call["id"] for call in event.get("tool_calls") or [] if isinstance(call, dict) and call.get("id")]
+    if not event.get("thread_id") or not ids:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The agent's question could not be found in the ledger")
+    return event["thread_id"], ids
+
+
+async def _continue(run_id: str, request: Request, text: str | None) -> RunControlResponse:
+    """Take the run's next turn in the same session: the resume prompt, a message, or the answer to its question.
 
     Approvals never go through here: a run waiting on a merge must use POST /runs/{id}/approval.
     """
     state = request.app.state
     ledger: Ledger = state.ledger
     manager: RunManager = state.run_manager
+    trueforge = state.trueforge_client
 
     async with manager.approval_lock(run_id):
         await ledger.flush()
         run = await _get_run(ledger, run_id)
-        if run["status"] not in RESUMABLE_STATUSES:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run cannot be resumed (status is {run['status']})")
+        current = run["status"]
+        if current == "running":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The agent is still working. Pause it first, or wait for it to finish")
+        if current == "awaiting_approval":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The agent is waiting for a decision on the merge. Approve or reject it first")
+        if current == "awaiting_input" and text is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="The agent asked a question. Answer it to continue")
+        if current not in RESUMABLE_STATUSES and current != "awaiting_input":
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Run cannot continue (status is {current})")
         try:
-            turn = await state.trueforge_client.start_turn(run["session_id"], RESUME_PROMPT)
+            if current == "awaiting_input":
+                thread_id, call_ids = await _pending_question(ledger, run)
+                turn = await trueforge.answer_question(run["session_id"], run["turn_id"], thread_id, call_ids, text or "")
+            else:
+                turn = await trueforge.start_turn(run["session_id"], text or RESUME_PROMPT)
         except (TrueForgeError, httpx.HTTPError) as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"TrueForge did not resume the run: {exc}") from exc
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"TrueForge did not continue the run: {exc}") from exc
 
         base = await ledger.last_sequence(run_id)
         await ledger.begin_turn(run_id, turn.turn_id, base)
+        forget_receipt(request.app, run_id)
         manager.start(run_id, run["session_id"], turn.turn_id, after_sequence=base, base=base)
         return RunControlResponse(run_id=run_id, status="running")
+
+
+@router.post("/runs/{run_id}/resume", response_model=RunControlResponse)
+async def resume_run(run_id: str, request: Request) -> RunControlResponse:
+    """Continue a paused, stopped or finished run from where it stopped, in the same session and sandbox."""
+    return await _continue(run_id, request, None)
+
+
+@router.post("/runs/{run_id}/message", response_model=RunControlResponse)
+async def send_message(run_id: str, body: MessageRequest, request: Request) -> RunControlResponse:
+    """Say something to the run's agent: a new turn in the same session, or the answer to the question it asked."""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="The message is empty")
+    return await _continue(run_id, request, text)

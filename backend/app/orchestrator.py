@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 NOTE_RUN_META = "run_meta"
 NOTE_CHILD_RUN = "child_run"
 NOTE_GUARD = "guard"
+NOTE_PR = "pr"
 
 PR_URL = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 FENCED = re.compile(r"```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\r?\n(.*?)```", re.DOTALL)
@@ -49,14 +50,25 @@ FACT_INSTRUCTION = (
     f'{MARKER}{{"kind": "vulnerability", "advisory": "<advisory id>", "package": "<package>", '
     '"current": "<current version>", "fixed": "<first fixed version>", "severity": "<severity>"}'
 )
-# The Daytona sandbox image ships Python only, with no xz for .tar.xz archives and no git credentials.
-SANDBOX_NOTE = (
-    "The sandbox may not have Node.js. If node or npm is missing, install Node.js 22 yourself from the "
-    "linux x64 .tar.gz archive on https://nodejs.org/dist/latest-v22.x/ (xz is not available), symlink its "
-    "node, npm and npx into /usr/local/bin, and continue without asking. The sandbox has no GitHub "
-    "credentials: create the branch, push files and open the PR with the GitHub tools, never git push."
+# The Daytona sandbox image ships Python only, with no xz for .tar.xz archives and no git credentials. Node version
+# numbers must not be guessed: a wrong one downloads a 14 byte "File not found" page, so resolve the file name first.
+NODE_INSTALL = (
+    "V=$(curl -fsSL https://nodejs.org/dist/latest-v22.x/SHASUMS256.txt | grep -o 'node-v[0-9.]*-linux-x64\\.tar\\.gz' | head -1)"
+    " && curl -fsSLO https://nodejs.org/dist/latest-v22.x/$V && mkdir -p /opt/node"
+    " && tar -xzf $V -C /opt/node --strip-components=1 && ln -sf /opt/node/bin/* /usr/local/bin/ && node -v && npm -v"
 )
-FIXER_INSTRUCTIONS = f"{SANDBOX_NOTE}\n\n{FACT_INSTRUCTION}"
+SANDBOX_NOTE = (
+    "The sandbox may not have Node.js. If node or npm is missing, install it with exactly this command, without "
+    f"guessing a version number: {NODE_INSTALL}\n"
+    "Then continue without asking. The sandbox has no GitHub credentials: create the branch, push files and open the "
+    "PR with the GitHub tools, never git push."
+)
+# The fixer's model tends to end a turn by announcing its next step instead of taking it.
+KEEP_GOING = (
+    "Work through every step in this one turn. Never end your reply by saying what you will do next: do it. "
+    "End only when the PR is open, or when a step failed and you have reported what failed."
+)
+FIXER_INSTRUCTIONS = f"{SANDBOX_NOTE}\n\n{FACT_INSTRUCTION}\n\n{KEEP_GOING}"
 
 _current: "Orchestrator | None" = None
 
@@ -271,8 +283,46 @@ class Orchestrator:
         match = PR_URL.search(_content_text(event.get("content")))
         if match is None:
             return
-        self._pr_urls[run_id] = match.group(0)
-        self._spawn(self._start_provers(run_id, match.group(0)), f"Prover trigger for {run_id}")
+        # A fork PR's head is "owner:branch"; a same repo PR's head is just the branch.
+        head = call.arguments.get("head") if isinstance(call.arguments, dict) else None
+        via_fork = isinstance(head, str) and ":" in head
+        self._spawn(self.register_pr(run_id, match.group(0), None, via_fork, "tool_response"), f"PR for {run_id}")
+
+    def facts_seen(self, run_id: str, found: list[dict[str, Any]]) -> None:
+        for fact in found:
+            if fact.get("kind") != "pr" or not isinstance(fact.get("url"), str):
+                continue
+            match = PR_URL.search(fact["url"])
+            if match is None:
+                continue
+            number = fact.get("number") if isinstance(fact.get("number"), int) and not isinstance(fact.get("number"), bool) else None
+            via_fork = fact.get("via_fork") if isinstance(fact.get("via_fork"), bool) else None
+            self._spawn(self.register_pr(run_id, match.group(0), number, via_fork, "fact"), f"PR for {run_id}")
+
+    async def pr(self, run_id: str) -> dict[str, Any] | None:
+        """The PR the run opened, as its chained "pr" note recorded it once."""
+        notes = await self._ledger.get_notes(run_id, kind=NOTE_PR)
+        return notes[0]["payload"] if notes else None
+
+    async def register_pr(self, run_id: str, url: str, number: int | None, via_fork: bool | None, source: str) -> None:
+        """A PR is opened when create_pull_request answers with its URL or the agent reports a "pr" fact, whichever
+        comes first. Recorded once as a chained note, then the provers start from it."""
+        role, parent = await self.meta(run_id)
+        if role != "fixer" or parent is not None:
+            return
+        async with self._lock(run_id, "pr"):
+            if await self.pr(run_id) is None:
+                match = PR_URL.search(url)
+                number = number if number is not None else (int(url.rstrip("/").rsplit("/", 1)[-1]) if match else None)
+                if via_fork is None:
+                    run = await self._ledger.get_run(run_id)
+                    owner = (run or {}).get("repo", "/").split("/", 1)[0].lower()
+                    via_fork = bool(run and run["via_fork"]) or not url.lower().startswith(f"https://github.com/{owner}/")
+                await self._ledger.append_note(run_id, NOTE_PR, {"url": url, "number": number, "via_fork": via_fork, "source": source})
+                logger.info("Run %s opened %s (from %s)", run_id, url, source)
+            stored = await self.pr(run_id)
+        self._pr_urls[run_id] = stored["url"]
+        self._spawn(self._start_provers(run_id, stored["url"]), f"Prover trigger for {run_id}")
 
     def turn_done(self, run_id: str, status: str, final_text: str) -> None:
         self._spawn(self._after_turn(run_id, status, final_text), f"Turn end for {run_id}")
@@ -300,9 +350,10 @@ class Orchestrator:
             return
         if parent is not None:
             return
-        if run_id in self._pr_urls:
+        pr = await self.pr(run_id)
+        if pr is not None:
             # Vulnerability facts may have arrived after the PR; the trigger skips provers already started.
-            self._spawn(self._start_provers(run_id, self._pr_urls[run_id]), f"Prover trigger for {run_id}")
+            self._spawn(self._start_provers(run_id, pr["url"]), f"Prover trigger for {run_id}")
         if status == "done":
             self._spawn(self._auto_receipt(run_id), f"Receipt for {run_id}")
 
@@ -334,17 +385,19 @@ class Orchestrator:
                 return
             await asyncio.sleep(RECEIPT_POLL_SECONDS)
 
-    def receipt_stored(self, run_id: str, receipt: dict[str, Any]) -> None:
-        self._spawn(self._start_receipt_child(run_id, receipt), f"Receipt agent for {run_id}")
+    def receipt_stored(self, run_id: str, receipt: dict[str, Any], note_id: int) -> None:
+        self._spawn(self._start_receipt_child(run_id, receipt, note_id), f"Receipt agent for {run_id}")
 
-    async def _start_receipt_child(self, run_id: str, receipt: dict[str, Any]) -> None:
+    async def _start_receipt_child(self, run_id: str, receipt: dict[str, Any], note_id: int) -> None:
+        """One receipt agent per stored receipt: a run continued after its first receipt gets a new breakdown."""
         _, parent = await self.meta(run_id)
         if parent is not None:
             return
+        purpose = f"receipt {note_id}"
         async with self._lock(run_id, "receipt"):
-            if await self._has_child(run_id, "receipt", "receipt"):
+            if await self._has_child(run_id, "receipt", purpose):
                 return
-            await self.start_child_run(run_id, "receipt", f"Receipt data:\n{json.dumps(receipt, indent=2)}", "receipt")
+            await self.start_child_run(run_id, "receipt", f"Receipt data:\n{json.dumps(receipt, indent=2)}", purpose)
 
     async def start_auditor(self, run_id: str, report: dict[str, Any]) -> str:
         return await self.start_child_run(

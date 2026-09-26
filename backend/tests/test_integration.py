@@ -109,7 +109,9 @@ class AgentsFake:
     def __init__(self, scripts: dict[str, Script] | None = None) -> None:
         self.scripts = {**DEFAULT_SCRIPTS, **(scripts or {})}
         self.sessions: dict[str, str] = {}
-        self.turn_messages: dict[str, str] = {}
+        # turn id -> (session id, message or answer)
+        self.turn_messages: dict[str, tuple[str, str]] = {}
+        self.answers: list[tuple[str, str, list[str], str]] = []
         self.started: list[tuple[str, str]] = []
         # ("start" | "done", agent) in the order turns started and reached turn.done.
         self.log: list[tuple[str, str]] = []
@@ -126,15 +128,22 @@ class AgentsFake:
     async def start_turn(self, session_id: str, message: str) -> TurnHandle:
         self.started.append((self.sessions[session_id], message))
         self.log.append(("start", self.sessions[session_id]))
-        self.turn_messages[session_id] = message
-        return TurnHandle(session_id=session_id, turn_id=f"turn_{session_id}", status="running")
+        turn_id = f"turn_{session_id}_{len(self.turn_messages) + 1}"
+        self.turn_messages[turn_id] = (session_id, message)
+        return TurnHandle(session_id=session_id, turn_id=turn_id, status="running")
+
+    async def answer_question(self, session_id: str, turn_id: str, thread_id: str, tool_call_ids: list[str], content: str) -> TurnHandle:
+        self.answers.append((turn_id, thread_id, tool_call_ids, content))
+        new_turn = f"turn_{session_id}_{len(self.turn_messages) + 1}"
+        self.turn_messages[new_turn] = (session_id, f"ANSWER {content}")
+        return TurnHandle(session_id=session_id, turn_id=new_turn, status="running")
 
     async def cancel(self, session_id: str) -> None:
         self.cancelled.append(session_id)
 
     async def stream_turn(self, session_id: str, turn_id: str, after_sequence: int | None = None):
         agent = self.sessions[session_id]
-        for sequence, event in enumerate(self.scripts[agent](self.turn_messages[session_id]), start=1):
+        for sequence, event in enumerate(self.scripts[agent](self.turn_messages[turn_id][1]), start=1):
             if sequence > (after_sequence or 0):
                 await asyncio.sleep(0)
                 if event["type"] == "turn.done":
@@ -309,11 +318,12 @@ async def test_finished_run_gets_its_receipt_and_one_receipt_agent():
         run_id = await start_fixer(client)
         await until(finished(client, run_id, "receipt", 1))
         receipt = await notes(app, run_id, "receipt")
+        note_id = (await app.state.ledger.get_notes(run_id, kind="receipt"))[0]["id"]
 
         # A second request for the receipt, and a repeated trigger, start nothing new.
         assert (await client.get(f"/runs/{run_id}/receipt")).status_code == 200
-        app.state.orchestrator.receipt_stored(run_id, receipt[0])
-        await app.state.orchestrator._start_receipt_child(run_id, receipt[0])
+        app.state.orchestrator.receipt_stored(run_id, receipt[0], note_id)
+        await app.state.orchestrator._start_receipt_child(run_id, receipt[0], note_id)
         [child] = await children_of(client, run_id)
 
     assert len(receipt) == 1 and receipt[0]["source"] == "events" and receipt[0]["cost_usd"] is None
@@ -492,3 +502,208 @@ async def test_run_created_before_child_runs_still_verifies_and_lists_as_a_fixer
     assert run["role"] == "fixer" and run["parent_run_id"] is None
     assert [(r["id"], r["role"]) for r in listed] == [("legacy", "fixer")]
     assert auditor
+
+
+# Continuing a run
+
+
+def question_script(message: str) -> list[dict[str, Any]]:
+    """First turn asks the user something; the answer turn finishes."""
+    if message.startswith("ANSWER "):
+        return reply(f"Thanks, you said {message.removeprefix('ANSWER ')}.")
+    ask = {
+        "id": "call_q",
+        "type": "function",
+        "function": {"name": "ask_user_question", "arguments": json.dumps({"question": "Which branch?"})},
+        "tool_info": {"type": "truefoundry-system", "name": "ask_user_question"},
+    }
+    return [
+        {"type": "turn.created", "id": "e1"},
+        {"type": "model.message", "id": "e2", "thread_id": "th_main", "content": None, "tool_calls": [ask]},
+        {"type": "tool.response_required", "id": "e3", "thread_id": "th_main", "tool_calls": [{"id": "call_q", "source_event_id": "e2"}]},
+        {"type": "turn.done", "id": "e4", "state": {"status": "done"}},
+    ]
+
+
+async def wait_status(app: Any, run_id: str, wanted: str) -> None:
+    async def check() -> bool:
+        await app.state.ledger.flush()
+        return (await app.state.ledger.get_run(run_id))["status"] == wanted
+
+    await until(check)
+
+
+async def test_a_message_to_a_finished_run_continues_the_same_session():
+    fake = AgentsFake({"greenlight": lambda message: reply("Nothing to fix.") if "Check" in message else reply(f"Hello, you said {message}")})
+    async with api(fake) as (client, app):
+        run_id = await start_fixer(client)
+        await wait_status(app, run_id, "done")
+        response = await client.post(f"/runs/{run_id}/message", json={"text": "hi"})
+        await wait_status(app, run_id, "done")
+        run = await app.state.ledger.get_run(run_id)
+        events = (await client.get(f"/runs/{run_id}/ledger")).json()["events"]
+        verified = await verify(client, run_id)
+
+    assert response.status_code == 200 and response.json()["status"] == "running"
+    fixer_turns = [(sid, text) for sid, text in fake.turn_messages.values() if fake.sessions[sid] == "greenlight"]
+    assert [text for _, text in fixer_turns][1:] == ["hi"]
+    assert len({sid for sid, _ in fixer_turns}) == 1  # same TrueForge session, so same context and sandbox
+    assert [e["type"] for e in events].count("turn.done") == 2
+    assert verified["ok"] is True
+
+
+async def test_try_again_on_a_run_that_stopped_resumes_from_where_it_stopped():
+    fake = AgentsFake({"greenlight": lambda message: reply("Stopped short.")})
+    async with api(fake) as (client, app):
+        run_id = await start_fixer(client)
+        await wait_status(app, run_id, "done")
+        response = await client.post(f"/runs/{run_id}/resume")
+        await wait_status(app, run_id, "done")
+
+    from app.routes.runs import RESUME_PROMPT
+
+    assert response.status_code == 200
+    assert fake.started_by("greenlight")[-1] == RESUME_PROMPT
+    assert "Do not redo steps" in RESUME_PROMPT and "sandbox was reset" in RESUME_PROMPT
+
+
+async def test_a_message_answers_the_question_the_agent_asked():
+    fake = AgentsFake({"greenlight": question_script})
+    async with api(fake) as (client, app):
+        run_id = await start_fixer(client)
+        await wait_status(app, run_id, "awaiting_input")
+        resume = await client.post(f"/runs/{run_id}/resume")
+        response = await client.post(f"/runs/{run_id}/message", json={"text": "main"})
+        await wait_status(app, run_id, "done")
+
+    assert resume.status_code == 409
+    assert response.status_code == 200
+    [(turn_id, thread_id, calls, content)] = fake.answers
+    assert thread_id == "th_main" and calls == ["call_q"] and content == "main"
+    assert turn_id.startswith("turn_sess_1_")
+
+
+async def test_a_message_is_refused_while_the_agent_works_or_waits_for_approval():
+    gate = asyncio.Event()
+
+    fake = AgentsFake()
+
+    async def slow_stream(session_id: str, turn_id: str, after_sequence: int | None = None):
+        await gate.wait()
+        yield TurnEvent(sequence=1, type="turn.created", data={"type": "turn.created"})
+
+    fake.stream_turn = slow_stream  # type: ignore[method-assign]
+    async with api(fake) as (client, app):
+        run_id = await start_fixer(client)
+        running = await client.post(f"/runs/{run_id}/message", json={"text": "hi"})
+        empty = await client.post(f"/runs/{run_id}/message", json={"text": "   "})
+        gate.set()
+
+    assert running.status_code == 409 and "still working" in running.json()["detail"]
+    assert empty.status_code in (400, 409)
+
+
+async def test_a_continued_run_gets_a_new_receipt():
+    fake = AgentsFake({"greenlight": lambda message: reply("Done for now.")})
+    async with api(fake) as (client, app):
+        run_id = await start_fixer(client)
+        await until(finished(client, run_id, "receipt", 1))
+        await client.post(f"/runs/{run_id}/message", json={"text": "continue"})
+        await until(finished(client, run_id, "receipt", 2))
+        receipts = await notes(app, run_id, "receipt")
+        latest = (await client.get(f"/runs/{run_id}/receipt")).json()
+
+    assert len(receipts) == 2
+    assert receipts[1]["model_calls"] == 2 and latest == receipts[1]
+
+
+def test_receipt_duration_counts_only_the_turns():
+    from app.receipt import _active_seconds
+
+    events = [
+        {"sequence": 1, "received_at": "2026-09-26T10:00:05+00:00"},
+        {"sequence": 2, "received_at": "2026-09-26T10:00:10+00:00"},
+        {"sequence": 3, "received_at": "2026-09-26T11:00:03+00:00"},
+    ]
+    turns = [("2026-09-26T10:00:00+00:00", 0), ("2026-09-26T11:00:00+00:00", 2)]
+    assert _active_seconds(events, turns) == 13.0
+
+
+# PR detection: create_pull_request response, "pr" fact, or both
+
+
+def pr_script(*, response: bool, fact: bool, head: str = "greenlight-agent:greenlight/node-fetch") -> Script:
+    def script(message: str) -> list[dict[str, Any]]:
+        events: list[dict[str, Any]] = [
+            {"type": "turn.created", "id": "e1"},
+            {"type": "model.message", "id": "e2", "content": f"Found one.\n{fact_line('vulnerability', advisory=GHSA_A)}"},
+        ]
+        if response:
+            call = {
+                "id": "call_pr",
+                "type": "function",
+                "function": {"name": "create_pull_request", "arguments": json.dumps({"owner": "acme", "repo": "widgets", "head": head})},
+                "tool_info": {"type": "mcp", "name": "create_pull_request", "server_name": "github"},
+            }
+            events += [
+                {"type": "model.message", "id": "e3", "content": None, "tool_calls": [call]},
+                {"type": "tool.response", "id": "e4", "tool_call_id": "call_pr", "content": json.dumps({"html_url": PR_URL, "number": 9})},
+            ]
+        text = "The PR is open."
+        if fact:
+            text += "\n" + fact_line("pr", url=PR_URL, number=9, via_fork=True)
+        events += [{"type": "model.message", "id": "e5", "content": text}, {"type": "turn.done", "id": "e6", "state": {"status": "done"}}]
+        return events
+
+    return script
+
+
+async def pr_outcome(fake: AgentsFake) -> tuple[dict[str, Any], list[Any], list[dict[str, Any]], str]:
+    async with api(fake) as (client, app):
+        run_id = await start_fixer(client)
+        await until(finished(client, run_id, "receipt", 1))
+        await asyncio.sleep(0.05)
+        run = (await client.get(f"/runs/{run_id}")).json()
+        pr_notes = await notes(app, run_id, "pr")
+        children = await children_of(client, run_id)
+        report = (await client.get(f"/runs/{run_id}/audit/export", params={"format": "md"})).text
+    return run, pr_notes, children, report
+
+
+async def test_pr_from_the_create_pull_request_response():
+    run, pr_notes, children, report = await pr_outcome(AgentsFake({"greenlight": pr_script(response=True, fact=False)}))
+    assert run["pr_url"] == PR_URL and run["pr_number"] == 9 and run["pr_via_fork"] is True
+    assert run["stopped_without_pr"] is False
+    assert [n["source"] for n in pr_notes] == ["tool_response"]
+    assert [c["purpose"] for c in children if c["role"] == "prover"] == [f"verify {PR_URL} {GHSA_A}"]
+    assert "## Pull request" in report and PR_URL in report
+
+
+async def test_pr_from_the_pr_fact_alone():
+    run, pr_notes, children, _ = await pr_outcome(AgentsFake({"greenlight": pr_script(response=False, fact=True)}))
+    assert run["pr_url"] == PR_URL and run["pr_number"] == 9 and run["pr_via_fork"] is True
+    assert run["stopped_without_pr"] is False
+    assert [n["source"] for n in pr_notes] == ["fact"]
+    assert len([c for c in children if c["role"] == "prover"]) == 1
+
+
+async def test_pr_from_both_sources_is_stored_once_and_proven_once():
+    fake = AgentsFake({"greenlight": pr_script(response=True, fact=True)})
+    run, pr_notes, children, _ = await pr_outcome(fake)
+    assert run["pr_url"] == PR_URL
+    assert len(pr_notes) == 1
+    assert len([c for c in children if c["role"] == "prover"]) == 1
+    assert fake.started_by("greenlight-prover") == [f"Verify {PR_URL} for advisory {GHSA_A}"]
+
+
+async def test_no_pr_from_either_source_is_the_stopped_state():
+    run, pr_notes, children, _ = await pr_outcome(AgentsFake({"greenlight": pr_script(response=False, fact=False)}))
+    assert run["pr_url"] is None and run["pr_number"] is None and run["pr_via_fork"] is None
+    assert run["stopped_without_pr"] is True
+    assert pr_notes == []
+    assert [c for c in children if c["role"] == "prover"] == []
+
+
+async def test_a_same_repo_pr_is_not_via_fork():
+    run, _, _, _ = await pr_outcome(AgentsFake({"greenlight": pr_script(response=True, fact=False, head="greenlight/node-fetch")}))
+    assert run["pr_via_fork"] is False

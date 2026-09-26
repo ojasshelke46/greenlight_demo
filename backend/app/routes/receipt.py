@@ -37,6 +37,13 @@ def _state(app: FastAPI) -> _ReceiptState:
     return state
 
 
+def forget_receipt(app: FastAPI, run_id: str) -> None:
+    """Drop the cached answer when the run takes another turn, so its next receipt covers that turn too."""
+    state = _state(app)
+    state.cache.pop(run_id, None)
+    state.first_attempt.pop(run_id, None)
+
+
 @router.get("/runs/{run_id}/receipt")
 async def get_receipt(run_id: str, request: Request) -> JSONResponse:
     status_code, body = await compute_receipt(request.app, run_id)
@@ -69,9 +76,12 @@ async def _resolve(run_id: str, app: FastAPI, state: _ReceiptState) -> tuple[int
     if run["status"] not in FINAL_STATUSES:
         return 409, {"reason": "run not finished"}
 
+    # A receipt covers the run up to when it was settled; a turn taken after it (the run was continued) needs a new one.
     stored = await ledger.get_notes(run_id, kind=NOTE_RECEIPT)
-    if stored:
-        return 200, stored[0]["payload"]
+    cursor = await ledger.db.execute("SELECT MAX(created_at) FROM turns WHERE run_id = ?", (run_id,))
+    last_turn = (await cursor.fetchone())[0]
+    if stored and (last_turn is None or stored[-1]["created_at"] >= last_turn):
+        return 200, stored[-1]["payload"]
 
     receipt = await build_receipt(run_id, ledger=ledger, http=app_state.http_client, settings=settings)
     if receipt is None:
@@ -83,8 +93,8 @@ async def _resolve(run_id: str, app: FastAPI, state: _ReceiptState) -> tuple[int
             return 202, {"status": "pending"}
 
     body = receipt.model_dump(mode="json")
-    await ledger.append_note(run_id, NOTE_RECEIPT, body)
+    note = await ledger.append_note(run_id, NOTE_RECEIPT, body)
     state.first_attempt.pop(run_id, None)
     if (running := orchestrator.current()) is not None:
-        running.receipt_stored(run_id, body)
+        running.receipt_stored(run_id, body, note["id"])
     return 200, body

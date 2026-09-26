@@ -107,7 +107,22 @@ def _usage(payload: dict[str, Any]) -> CallUsage | None:
     return CallUsage(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
-def _ledger_facts(trail: dict[str, Any]) -> _LedgerFacts:
+def _active_seconds(events: list[dict[str, Any]], turns: list[tuple[str, int]]) -> float | None:
+    """Time the agent was working: each turn from its start to its last event, summed. A run continued later
+    is not charged for the time it sat finished between turns."""
+    if not events:
+        return None
+    total = 0.0
+    for index, (started_at, base) in enumerate(turns):
+        end = turns[index + 1][1] if index + 1 < len(turns) else None
+        mine = [e for e in events if e["sequence"] > base and (end is None or e["sequence"] <= end)]
+        if mine:
+            span = datetime.fromisoformat(mine[-1]["received_at"]) - datetime.fromisoformat(started_at)
+            total += max(0.0, span.total_seconds())
+    return round(total, 1)
+
+
+def _ledger_facts(trail: dict[str, Any], turns: list[tuple[str, int]] | None = None) -> _LedgerFacts:
     events = trail["events"]
     created = datetime.fromisoformat(trail["run"]["created_at"])
     last = datetime.fromisoformat(events[-1]["received_at"]) if events else None
@@ -121,7 +136,7 @@ def _ledger_facts(trail: dict[str, Any]) -> _LedgerFacts:
         window=RunWindow(start=created, end=last or created, calls=calls),
         model_call_events=len(model_messages),
         advisories_fixed=_advisories_fixed(events),
-        duration_seconds=round((last - created).total_seconds(), 1) if last else None,
+        duration_seconds=_active_seconds(events, turns) if turns else (round((last - created).total_seconds(), 1) if last else None),
     )
 
 
@@ -130,7 +145,11 @@ async def build_receipt(run_id: str, *, ledger: Ledger, http: httpx.AsyncClient,
     trail = await ledger.audit_trail(run_id)
     if trail is None:
         return None
-    facts = _ledger_facts(trail)
+    cursor = await ledger.db.execute(
+        "SELECT created_at, base_sequence FROM turns WHERE run_id = ? ORDER BY base_sequence, created_at", (run_id,)
+    )
+    turns = [(row["created_at"], row["base_sequence"]) for row in await cursor.fetchall()]
+    facts = _ledger_facts(trail, turns)
     gateway_calls = await fetch_run_calls(facts.window, http, settings)
 
     common = {

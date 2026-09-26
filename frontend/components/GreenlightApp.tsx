@@ -53,7 +53,7 @@ function setUrl(params: Record<string, string> | null) {
 
 export function GreenlightApp() {
   const reduce = useReducedMotion();
-  const { run, open, decide, pause, resume, reset } = useRun();
+  const { run, open, decide, pause, resume, say, reset } = useRun();
   const { submitApproval } = useApproval();
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -69,6 +69,7 @@ export function GreenlightApp() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [answering, setAnswering] = useState(false);
   const [controlError, setControlError] = useState<string | null>(null);
   const [flare, setFlare] = useState(false);
   const [replay, setReplay] = useState(false);
@@ -213,19 +214,30 @@ export function GreenlightApp() {
 
   const ready = access.status === "ready" ? access.access : null;
   const policyReady = policy?.status === "ready" ? policy.info : null;
-  const canSend =
-    !sending &&
-    (agent === "fixer"
-      ? Boolean(repoUrl && ready && ready.modeOptions.includes(mode))
-      : agent === "scout"
-        ? target !== null
-        : Boolean(repoUrl && policyReady && !policyReady.exists));
-
   const request = (): StartRequest | null => {
     if (agent === "scout") return target ? { role: "scout", target } : null;
     if (!repoUrl) return null;
     return agent === "policy" ? { role: "policy", repo: repoUrl } : { role: "fixer", repo: repoUrl, mode };
   };
+
+  // With a run open, anything that is not a new run request (no repo link, no scout target) goes to that
+  // run's agent in the same session: "hi", "continue", or the answer to its question.
+  const followUp = run !== null && text.trim() !== "" && request() === null;
+  const awaitingMerge = run?.approval.status === "pending" || run?.approval.status === "refused";
+  const followUpBlocked = !followUp ? null : awaitingMerge ? "Approve or reject the merge first" : null;
+  const followUpNote = !followUp
+    ? null
+    : (followUpBlocked ?? (run?.question ? "Sends your answer to the agent" : "Sends to this run's agent, in the same session"));
+
+  const canSend =
+    !sending &&
+    (followUp
+      ? followUpBlocked === null
+      : agent === "fixer"
+      ? Boolean(repoUrl && ready && ready.modeOptions.includes(mode))
+      : agent === "scout"
+        ? target !== null
+        : Boolean(repoUrl && policyReady && !policyReady.exists));
 
   const note: ComposerNote | null =
     agent === "scout"
@@ -247,8 +259,20 @@ export function GreenlightApp() {
         : null;
 
   const send = async () => {
+    if (!canSend) return;
+    if (followUp) {
+      setSending(true);
+      setSendError(null);
+      follow.current = true;
+      const error = await say(text.trim());
+      if (error) setSendError(error);
+      else setText("");
+      setSending(false);
+      refreshRuns();
+      return;
+    }
     const next = request();
-    if (!canSend || !next) return;
+    if (!next) return;
     setSending(true);
     try {
       await launch(next);
@@ -289,6 +313,16 @@ export function GreenlightApp() {
     } finally {
       setRetrying(false);
     }
+  };
+
+  const onAnswer = async (answer: string) => {
+    setAnswering(true);
+    setControlError(null);
+    follow.current = true;
+    const error = await say(answer);
+    if (error) setControlError(error);
+    setAnswering(false);
+    refreshRuns();
   };
 
   const onPause = async () => {
@@ -416,6 +450,8 @@ export function GreenlightApp() {
                       setLedgerRunId(run.id);
                     }}
                     onFixRepo={fixRepo}
+                    onAnswer={onAnswer}
+                    answering={answering}
                   />
                 </div>
               )}
@@ -430,6 +466,8 @@ export function GreenlightApp() {
                   }}
                   agents={agents}
                   note={note}
+                  followUpNote={followUpNote}
+                  hasRun={hasRun}
                   text={text}
                   onTextChange={(t) => {
                     setText(t);

@@ -323,31 +323,56 @@ export function PausedCard({ step, onResume, resuming, onRetry, retrying, error 
   );
 }
 
-export function FailureCard({ reason, onRetry, retrying, onResume, resuming }: { reason: string; onRetry: () => void; retrying: boolean; onResume?: () => void; resuming?: boolean }) {
+/** A run that stopped. Try again continues in the same session and sandbox, from the step that failed. */
+export function FailureCard({
+  reason,
+  onTryAgain,
+  continuing,
+  onStartOver,
+  startingOver,
+  error,
+}: {
+  reason: string;
+  onTryAgain?: () => void;
+  continuing: boolean;
+  onStartOver: () => void;
+  startingOver: boolean;
+  error: string | null;
+}) {
   return (
     <section className="rounded-[var(--radius-card)] border border-fail/30 bg-fail/[0.06] p-5">
       <p className="flex items-center gap-2 text-[0.98rem] font-semibold text-fail">
         <Warning weight="bold" className="size-5" aria-hidden />
         {reason}
       </p>
+      {onTryAgain && <p className="mt-1.5 text-[0.88rem] leading-relaxed text-fg-muted">Try again picks up where the agent stopped, in the same session, with everything it has done so far.</p>}
+      {error && (
+        <p role="alert" className="mt-3 text-[0.85rem] text-fail">
+          {error}
+        </p>
+      )}
       <div className="mt-4 flex flex-wrap items-center gap-3">
-        {onResume && <ResumeButton onResume={onResume} resuming={resuming ?? false} />}
-        <button
-          type="button"
-          onClick={onRetry}
-          disabled={retrying}
-          className="inline-flex h-10 items-center gap-2 rounded-full border border-line-strong px-4 text-[0.88rem] font-medium text-fg transition-colors duration-150 hover:border-accent/50 hover:text-accent disabled:opacity-50"
-        >
-          {retrying ? <CircleNotch weight="bold" className="size-4 animate-spin" aria-hidden /> : <ArrowClockwise weight="bold" className="size-4" aria-hidden />}
-          Try again
+        {onTryAgain && (
+          <button
+            type="button"
+            onClick={onTryAgain}
+            disabled={continuing}
+            className="inline-flex h-10 items-center gap-2 rounded-full border border-line-strong px-4 text-[0.88rem] font-medium text-fg transition-colors duration-150 hover:border-accent/50 hover:text-accent disabled:opacity-50"
+          >
+            {continuing ? <CircleNotch weight="bold" className="size-4 animate-spin motion-reduce:animate-none" aria-hidden /> : <ArrowClockwise weight="bold" className="size-4" aria-hidden />}
+            {continuing ? "Continuing" : "Try again"}
+          </button>
+        )}
+        <button type="button" onClick={onStartOver} disabled={startingOver} className="rounded-full px-3 py-2 text-[0.88rem] text-fg-muted transition-colors duration-150 hover:text-fg disabled:opacity-50">
+          {startingOver ? "Starting over" : "Start over"}
         </button>
       </div>
     </section>
   );
 }
 
-/** The agent paused on ask_user_question. Greenlight shows it honestly; answering happens in TrueForge. */
-export function QuestionCard({ question, onRetry, retrying }: { question: AgentQuestion; onRetry: () => void; retrying: boolean }) {
+/** The agent paused on ask_user_question. Answer with an option here, or in your own words in the composer. */
+export function QuestionCard({ question, onAnswer, answering, error }: { question: AgentQuestion; onAnswer: (answer: string) => void; answering: boolean; error: string | null }) {
   return (
     <section className="rounded-[var(--radius-panel)] border border-progress/30 bg-panel p-5">
       <p className="flex items-center gap-2 text-[0.85rem] font-medium text-progress">
@@ -358,22 +383,25 @@ export function QuestionCard({ question, onRetry, retrying }: { question: AgentQ
       {question.options.length > 0 && (
         <ol className="mt-3 flex flex-col gap-1.5">
           {question.options.map((option, i) => (
-            <li key={i} className="rounded-xl border border-line bg-card px-3.5 py-2 text-[0.88rem] text-fg-muted">
-              {option}
+            <li key={i}>
+              <button
+                type="button"
+                disabled={answering}
+                onClick={() => onAnswer(option)}
+                className="w-full rounded-xl border border-line bg-card px-3.5 py-2 text-left text-[0.88rem] text-fg transition-colors duration-150 hover:border-accent/50 disabled:cursor-wait disabled:opacity-60"
+              >
+                {option}
+              </button>
             </li>
           ))}
         </ol>
       )}
-      <p className="mt-4 text-[0.82rem] text-fg-subtle">Answering from Greenlight is not supported yet. Answer it in the TrueForge session, or start the run again.</p>
-      <button
-        type="button"
-        onClick={onRetry}
-        disabled={retrying}
-        className="mt-3 inline-flex h-10 items-center gap-2 rounded-full border border-line-strong px-4 text-[0.88rem] font-medium text-fg transition-colors duration-150 hover:border-accent/50 hover:text-accent disabled:opacity-50"
-      >
-        {retrying ? <CircleNotch weight="bold" className="size-4 animate-spin" aria-hidden /> : <ArrowClockwise weight="bold" className="size-4" aria-hidden />}
-        Try again
-      </button>
+      {error && (
+        <p role="alert" className="mt-3 text-[0.85rem] text-fail">
+          {error}
+        </p>
+      )}
+      <p className="mt-4 text-[0.82rem] text-fg-subtle">{answering ? "Sending your answer" : "Or type your answer in the message box below."}</p>
     </section>
   );
 }

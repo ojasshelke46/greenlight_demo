@@ -24,6 +24,10 @@ type Props = {
   // From GET /api/agents; null while loading.
   agents: AgentInfo[] | null;
   note: ComposerNote | null;
+  // Set when the text will go to the open run's agent instead of starting a new run.
+  followUpNote: string | null;
+  // A run is open: plain text replies to it, a repo link starts a new one.
+  hasRun: boolean;
   text: string;
   onTextChange: (text: string) => void;
   hasRepo: boolean;
@@ -49,7 +53,7 @@ const chipMotion = {
 } as const;
 
 export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer(
-  { agent, onAgentChange, agents, note, text, onTextChange, hasRepo, access, mode, onModeChange, canSend, sending, error, onSend, agentWorking, pausing, onPause },
+  { agent, onAgentChange, agents, note, followUpNote, hasRun, text, onTextChange, hasRepo, access, mode, onModeChange, canSend, sending, error, onSend, agentWorking, pausing, onPause },
   ref,
 ) {
   const reduce = useReducedMotion();
@@ -94,12 +98,17 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
               {access.message}
             </motion.span>
           )}
-          {fix && access.status === "idle" && text.trim() !== "" && !hasRepo && (
+          {followUpNote && (
+            <motion.span key={`followup:${followUpNote}`} {...chip} className="inline-flex h-8 items-center px-1 text-[0.82rem] text-fg-subtle">
+              {followUpNote}
+            </motion.span>
+          )}
+          {!followUpNote && fix && access.status === "idle" && text.trim() !== "" && !hasRepo && (
             <motion.span key="hint" {...chip} className="inline-flex h-8 items-center px-1 text-[0.82rem] text-fg-subtle">
               {copy.hint}
             </motion.span>
           )}
-          {!fix && note && (
+          {!followUpNote && !fix && note && (
             <motion.span
               key={`note:${note.text}`}
               {...chip}
@@ -125,7 +134,7 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
         value={text}
         onChange={(event) => onTextChange(event.target.value)}
         onKeyDown={onKeyDown}
-        placeholder={copy.placeholder}
+        placeholder={hasRun ? "Reply to the agent, or paste a repo link to start a new run" : copy.placeholder}
         spellCheck={false}
         className="block max-h-48 min-h-14 w-full resize-none bg-transparent px-3 py-3 text-[1.05rem] leading-relaxed text-fg outline-none focus-visible:outline-none [field-sizing:content] placeholder:text-fg-subtle"
       />

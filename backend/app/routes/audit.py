@@ -240,6 +240,13 @@ def render_markdown(snapshot: dict[str, Any]) -> str:
     else:
         lines.append("No approvals were requested.")
 
+    prs = [json.loads(note["payload_json"]) for note in snapshot["notes"] if note["kind"] == "pr"]
+    if prs:
+        pr = prs[0]
+        number = f"#{pr['number']}" if pr.get("number") is not None else "PR"
+        how = "from a fork" if pr.get("via_fork") else "from a branch on the repo"
+        lines += ["", "## Pull request", "", f"- [{number}]({pr['url']}), opened {how} (seen in {pr.get('source', 'events')})"]
+
     receipts = [note for note in snapshot["notes"] if note["kind"] == NOTE_RECEIPT]
     if receipts:
         receipt = json.loads(receipts[-1]["payload_json"])

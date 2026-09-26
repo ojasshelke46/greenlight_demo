@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from tests.test_approval import AUTH, api, github_state  # noqa: F401
+from app.routes.runs import RESUME_PROMPT
 from app.trueforge import TurnEvent, TurnHandle
 
 
@@ -95,7 +96,7 @@ async def test_resume_continues_in_the_same_session_and_stream():
         events = await client.get(f"/runs/{run_id}/events")
 
     assert response.status_code == 200 and response.json()["status"] == "running"
-    assert fake.turns[1] == ("sess_1", "Continue the task from where you stopped. Keep the same repo and the same MODE.")
+    assert fake.turns[1] == ("sess_1", RESUME_PROMPT)
     sequences = [int(line[4:]) for line in events.text.splitlines() if line.startswith("id: ")]
     assert sequences == [1, 2, 3, 4, 5, 6]
     types = [json.loads(line[6:])["type"] for line in events.text.splitlines() if line.startswith("data: ")]

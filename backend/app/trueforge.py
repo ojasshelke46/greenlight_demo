@@ -205,6 +205,16 @@ class TrueForgeClient:
                 return TurnEvent(sequence=None, type="turn.done", data=event)
         raise TrueForgeError(f"turn {turn_id} finished but has no stored turn.done event")
 
+    async def answer_question(
+        self, session_id: str, turn_id: str, thread_id: str, tool_call_ids: list[str], content: str
+    ) -> TurnHandle:
+        """Resume a turn paused on tool.response_required with the user's answer to each pending call."""
+        items = [
+            {"type": "user.tool_response", "thread_id": thread_id, "tool_call_id": tool_call_id, "content": content}
+            for tool_call_id in tool_call_ids
+        ]
+        return await self._create_turn(session_id, items, previous_turn_id=turn_id)
+
     async def resume_with_approval(
         self,
         session_id: str,

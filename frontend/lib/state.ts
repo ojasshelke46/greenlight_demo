@@ -117,6 +117,8 @@ export type PullRequest = {
 
 export type Block = (
   | { kind: "text"; id: string; text: string }
+  // What the user said in a later turn of the same session: a message, an answer, or the try again prompt.
+  | { kind: "user"; id: string; text: string; answer: boolean }
   | { kind: "terminal"; id: string; commands: TerminalCommand[] }
   | { kind: "action"; id: string; server: string | null; tool: string; target: string; running: boolean; stopped: boolean; error: string | null }
   | { kind: "vulns"; id: string; items: Vulnerability[] }
@@ -199,7 +201,7 @@ export type RunState = RunMeta & {
   paused: boolean;
   // A pause request was sent and TrueForge has not ended the turn yet.
   pausing: boolean;
-  // Paused, errored or timed out runs can continue with a new turn in the same session.
+  // An ended run (paused, errored, or stopped short) can continue with a new turn in the same session.
   canResume: boolean;
   // Owned by the features in lib/features; folded from the same events as everything above.
   features: FeaturesState;

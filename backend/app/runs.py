@@ -33,6 +33,7 @@ class RunObserver(Protocol):
     def tool_calls(self, run_id: str, session_id: str) -> None: ...
     def tool_response(self, run_id: str, call: ResolvedToolCall | None, event: dict[str, Any]) -> None: ...
     def turn_done(self, run_id: str, status: str, final_text: str) -> None: ...
+    def facts_seen(self, run_id: str, found: list[dict[str, Any]]) -> None: ...
 
 
 class LiveRun:
@@ -205,7 +206,10 @@ class RunManager:
                         self._ledger.append_event(run_id, sequence, event_type, data, received_at)
 
                         # After publish, and only queued, so facts never delay the stream.
-                        facts.record(run_id, fact_stream.feed(event))
+                        found = fact_stream.feed(event)
+                        facts.record(run_id, found)
+                        if found:
+                            self._notify("facts_seen", run_id, found)
 
                         if event_type == "model.message":
                             calls = messages.setdefault(event["id"], [])

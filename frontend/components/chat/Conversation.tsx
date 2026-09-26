@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowsClockwise, Binoculars, GithubLogo, ListChecks } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowsClockwise, Binoculars, GithubLogo, ListChecks } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Fragment, useState, type ReactNode } from "react";
@@ -35,6 +35,9 @@ type Props = {
   onAuditReport: (auditorRunId: string) => void;
   // Starts a Fix run on a repo from the scout's board, after the access check.
   onFixRepo: (repo: string) => void;
+  // Answers the agent's question in the same session (from an option on the question card).
+  onAnswer: (answer: string) => void;
+  answering: boolean;
 };
 
 type TimelineItem = { key: string; at: number; block: Block | null; child: ChildRun | null };
@@ -89,7 +92,7 @@ function RequestBubble({ run }: { run: RunState }) {
   );
 }
 
-export function Conversation({ run, flare, retrying, resuming, controlError, onDecide, onRetry, onResume, onAuditReport, onFixRepo }: Props) {
+export function Conversation({ run, flare, retrying, resuming, controlError, onDecide, onRetry, onResume, onAuditReport, onFixRepo, onAnswer, answering }: Props) {
   const reduce = useReducedMotion();
   // Blocks that already existed on first render (a replayed run) appear without an entrance.
   const [initialIds] = useState(() => new Set(run.blocks.map((b) => b.id)));
@@ -168,7 +171,7 @@ export function Conversation({ run, flare, retrying, resuming, controlError, onD
             <ProofPanel variant="run" run={run} />
           </motion.div>
 
-          <Outcome run={run} awaiting={awaiting} decided={decided} pending={pending} canShip={canShip} retrying={retrying} resuming={resuming} controlError={controlError} onDecide={onDecide} onRetry={onRetry} onResume={onResume} enter={enter} receiptHelper={receiptHelper} onAuditReport={onAuditReport} />
+          <Outcome run={run} awaiting={awaiting} decided={decided} pending={pending} canShip={canShip} retrying={retrying} resuming={resuming} controlError={controlError} onDecide={onDecide} onRetry={onRetry} onResume={onResume} enter={enter} receiptHelper={receiptHelper} onAuditReport={onAuditReport} onAnswer={onAnswer} answering={answering} />
         </div>
       </div>
     </div>
@@ -190,6 +193,8 @@ function Outcome({
   enter,
   receiptHelper,
   onAuditReport,
+  onAnswer,
+  answering,
 }: {
   run: RunState;
   awaiting: boolean;
@@ -205,6 +210,8 @@ function Outcome({
   enter: (id: string) => false | { opacity: number; transform: string };
   receiptHelper: ChildRun | null;
   onAuditReport: (auditorRunId: string) => void;
+  onAnswer: (answer: string) => void;
+  answering: boolean;
 }) {
   const card = (id: string, node: ReactNode) => (
     <motion.div key={id} initial={enter(id)} animate={{ opacity: 1, transform: "translateY(0px)" }} transition={ENTER}>
@@ -245,13 +252,25 @@ function Outcome({
       ),
     );
   }
-  if (run.question) out.push(card("question", <QuestionCard question={run.question} onRetry={onRetry} retrying={retrying} />));
+  if (run.question) out.push(card("question", <QuestionCard question={run.question} onAnswer={onAnswer} answering={answering} error={controlError} />));
   if (run.paused) {
     const step = run.steps.find((s) => s.status === "paused")?.label ?? null;
     out.push(card("paused", <PausedCard step={step} onResume={onResume} resuming={resuming} onRetry={onRetry} retrying={retrying} error={controlError} />));
   }
   if (run.failure && !decided) {
-    out.push(card("failure", <FailureCard reason={run.failure.reason} onRetry={onRetry} retrying={retrying} onResume={run.canResume ? onResume : undefined} resuming={resuming} />));
+    out.push(
+      card(
+        "failure",
+        <FailureCard
+          reason={run.failure.reason}
+          onTryAgain={run.canResume ? onResume : undefined}
+          continuing={resuming}
+          onStartOver={onRetry}
+          startingOver={retrying}
+          error={controlError}
+        />,
+      ),
+    );
   }
 
   // Every other run that has ended (a helper agent's report, a fix that stopped short of a PR, a run that
@@ -271,8 +290,30 @@ function Outcome({
   return <>{out.map((node, i) => <Fragment key={i}>{node}</Fragment>)}</>;
 }
 
+// The try again prompt is long and written for the agent; the bubble names what the user did.
+const TRY_AGAIN_PREFIX = "Continue the task from where you stopped";
+
+/** What the user said in a later turn of this run, as its turn.created event carried it. */
+function UserBubble({ text, answer }: { text: string; answer: boolean }) {
+  const tryAgain = text.startsWith(TRY_AGAIN_PREFIX);
+  return (
+    <div className="flex justify-end">
+      <p
+        title={tryAgain ? text : undefined}
+        className="flex max-w-[85%] items-start gap-2 whitespace-pre-wrap rounded-[var(--radius-card)] border border-line bg-card px-4 py-2.5 text-[0.92rem] leading-relaxed text-fg"
+      >
+        {tryAgain && <ArrowClockwise weight="bold" className="mt-[5px] size-3.5 shrink-0 text-fg-muted" aria-hidden />}
+        {answer && <span className="shrink-0 text-fg-subtle">Answer:</span>}
+        <span className="min-w-0">{tryAgain ? "Try again from where you stopped" : text}</span>
+      </p>
+    </div>
+  );
+}
+
 function BlockView({ block, live }: { block: Block; live: boolean }) {
   switch (block.kind) {
+    case "user":
+      return <UserBubble text={block.text} answer={block.answer} />;
     case "text":
       return <AgentMessage text={block.text} live={live} />;
     case "terminal":
