@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS turns (
     PRIMARY KEY (run_id, turn_id)
 );
 
+-- Things derived about a run after the fact, e.g. its cost receipt. kind names the note type.
+CREATE TABLE IF NOT EXISTS notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    kind TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_notes_run_id ON notes(run_id);
+
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
@@ -63,6 +73,10 @@ CREATE TRIGGER IF NOT EXISTS approvals_no_update BEFORE UPDATE ON approvals
 BEGIN SELECT RAISE(ABORT, 'approvals are append only'); END;
 CREATE TRIGGER IF NOT EXISTS approvals_no_delete BEFORE DELETE ON approvals
 BEGIN SELECT RAISE(ABORT, 'approvals are append only'); END;
+CREATE TRIGGER IF NOT EXISTS notes_no_update BEFORE UPDATE ON notes
+BEGIN SELECT RAISE(ABORT, 'notes are append only'); END;
+CREATE TRIGGER IF NOT EXISTS notes_no_delete BEFORE DELETE ON notes
+BEGIN SELECT RAISE(ABORT, 'notes are append only'); END;
 """
 
 _Write = Callable[[aiosqlite.Connection], Awaitable[Any]]
@@ -178,7 +192,7 @@ class Ledger:
         row = await cursor.fetchone()
         return row[0] if row else 0
 
-    async def record_approval(
+    async def append_approval(
         self,
         *,
         run_id: str,
@@ -223,15 +237,47 @@ class Ledger:
             "result": row["result"],
         }
 
-    def append_event(self, run_id: str, sequence: int, event_type: str, payload_json: str, received_at: str) -> None:
+    def append_event(
+        self, run_id: str, sequence: int, type: str, payload: str, received_at: str | None = None
+    ) -> None:
+        """Queue one event. payload is the event JSON exactly as streamed; received_at defaults to now."""
+        received_at = received_at or utc_now()
+
         async def write(db: aiosqlite.Connection) -> None:
             await db.execute(
                 "INSERT OR IGNORE INTO events (run_id, sequence, type, payload_json, received_at)"
                 " VALUES (?, ?, ?, ?, ?)",
-                (run_id, sequence, event_type, payload_json, received_at),
+                (run_id, sequence, type, payload, received_at),
             )
 
         self._queue.put_nowait((run_id, write))
+
+    async def append_note(self, run_id: str, kind: str, payload: Any) -> dict[str, Any]:
+        """Durably append one note about a run. payload must be JSON serialisable."""
+        row = {"kind": kind, "payload": payload, "created_at": utc_now()}
+        cursor = await self.db.execute(
+            "INSERT INTO notes (run_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
+            (run_id, kind, json.dumps(payload), row["created_at"]),
+        )
+        await self.db.commit()
+        return {"id": cursor.lastrowid, **row}
+
+    async def get_notes(self, run_id: str, kind: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT id, kind, payload_json, created_at FROM notes WHERE run_id = ?"
+        params: tuple[Any, ...] = (run_id,)
+        if kind is not None:
+            query += " AND kind = ?"
+            params += (kind,)
+        cursor = await self.db.execute(query + " ORDER BY id", params)
+        return [
+            {
+                "id": row["id"],
+                "kind": row["kind"],
+                "payload": json.loads(row["payload_json"]),
+                "created_at": row["created_at"],
+            }
+            for row in await cursor.fetchall()
+        ]
 
     def set_pending_action(self, run_id: str, pending_action: dict[str, Any]) -> None:
         async def write(db: aiosqlite.Connection) -> None:

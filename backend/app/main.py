@@ -15,6 +15,8 @@ from app.ledger import Ledger
 from app.log import configure_logging
 from app.middleware import RequestContextMiddleware
 from app.routes import api_router
+from app.routes.audit import router as audit_router
+from app.routes.receipt import router as receipt_router
 from app.runs import RunManager
 from app.trueforge import TrueForgeClient
 
@@ -69,6 +71,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router)
+    app.include_router(receipt_router)
+    app.include_router(audit_router)
 
     return app
 
