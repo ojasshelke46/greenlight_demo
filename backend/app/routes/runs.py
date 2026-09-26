@@ -230,7 +230,7 @@ async def decide_approval(run_id: str, body: ApprovalRequest, request: Request, 
                 if isinstance(verdict, Deny):
                     raise ApprovalRefused(verdict.reason)
                 if isinstance(verdict, NeedMore):
-                    waiting = await ledger.record_approval(
+                    waiting = await ledger.append_approval(
                         run_id=run_id,
                         tool_name=tool_name,
                         arguments=arguments,
