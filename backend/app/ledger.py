@@ -7,9 +7,20 @@ from typing import Any
 
 import aiosqlite
 
+from app.chain import GENESIS_HASH, ChainKind, entry_hash, head_hmac, make_entry
+from app.config import get_settings
 from app.log import run_id_var
 
 logger = logging.getLogger(__name__)
+
+_KEY_FROM_SETTINGS = object()
+
+
+def _settings_hmac_key() -> str | None:
+    try:
+        return get_settings().ledger_hmac_key
+    except Exception:  # a Ledger outside the app (scripts, some tests) may have no full settings
+        return None
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -65,6 +76,29 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 CREATE INDEX IF NOT EXISTS idx_notes_run_id ON notes(run_id);
 
+-- Tamper evidence: one hash chained entry per run, event, approval and note row, written in the same
+-- transaction as that row. ref_id is the row's id in its own table (the run id, the event sequence, or
+-- the approvals / notes autoincrement id). Runs created before the chain existed have no entries.
+CREATE TABLE IF NOT EXISTS chain (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    idx INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('run', 'event', 'approval', 'note')),
+    ref_id TEXT NOT NULL,
+    prev_hash TEXT NOT NULL,
+    entry_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (run_id, idx)
+);
+
+-- Latest entry per run, signed with LEDGER_HMAC_KEY when one is configured (signed = 0 otherwise).
+CREATE TABLE IF NOT EXISTS chain_heads (
+    run_id TEXT PRIMARY KEY REFERENCES runs(id),
+    idx INTEGER NOT NULL,
+    entry_hash TEXT NOT NULL,
+    head_hmac TEXT,
+    signed INTEGER NOT NULL
+);
+
 CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
 BEGIN SELECT RAISE(ABORT, 'events are append only'); END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
@@ -77,6 +111,10 @@ CREATE TRIGGER IF NOT EXISTS notes_no_update BEFORE UPDATE ON notes
 BEGIN SELECT RAISE(ABORT, 'notes are append only'); END;
 CREATE TRIGGER IF NOT EXISTS notes_no_delete BEFORE DELETE ON notes
 BEGIN SELECT RAISE(ABORT, 'notes are append only'); END;
+CREATE TRIGGER IF NOT EXISTS chain_no_update BEFORE UPDATE ON chain
+BEGIN SELECT RAISE(ABORT, 'chain is append only'); END;
+CREATE TRIGGER IF NOT EXISTS chain_no_delete BEFORE DELETE ON chain
+BEGIN SELECT RAISE(ABORT, 'chain is append only'); END;
 """
 
 _Write = Callable[[aiosqlite.Connection], Awaitable[Any]]
@@ -103,12 +141,48 @@ def _run_row(row: aiosqlite.Row) -> dict[str, Any]:
 class Ledger:
     """Single SQLite connection. Stream side writes are queued so disk latency never stalls the SSE fan out."""
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, hmac_key: Any = _KEY_FROM_SETTINGS) -> None:
         self._db_path = db_path
         self._db: aiosqlite.Connection | None = None
         # (run_id, write) pairs; the run id tags the log line if the write fails.
         self._queue: asyncio.Queue[tuple[str, _Write] | None] = asyncio.Queue()
         self._writer: asyncio.Task[None] | None = None
+        self._hmac_key: str | None = _settings_hmac_key() if hmac_key is _KEY_FROM_SETTINGS else hmac_key
+        # One write transaction at a time on the shared connection, so a source row and its chain entry
+        # always commit together. Lock order is always transaction first, then the run's chain lock.
+        self._tx_lock = asyncio.Lock()
+        # Serialises chain appends per run: the stream writer and the approval handler never compute
+        # the same idx or prev_hash.
+        self._chain_locks: dict[str, asyncio.Lock] = {}
+
+    def _chain_lock(self, run_id: str) -> asyncio.Lock:
+        return self._chain_locks.setdefault(run_id, asyncio.Lock())
+
+    async def _chain(
+        self, db: aiosqlite.Connection, run_id: str, kind: ChainKind, ref_id: str | int, source: dict[str, Any]
+    ) -> None:
+        """Append one chain entry. Caller holds the transaction and the run's chain lock."""
+        cursor = await db.execute("SELECT idx, entry_hash FROM chain_heads WHERE run_id = ?", (run_id,))
+        head = await cursor.fetchone()
+        if head is None:
+            if kind != "run":
+                return  # the run predates the chain; it is never backfilled
+            idx, prev_hash = 0, GENESIS_HASH
+        else:
+            idx, prev_hash = head["idx"] + 1, head["entry_hash"]
+
+        digest = entry_hash(prev_hash, make_entry(run_id, idx, kind, source))
+        await db.execute(
+            "INSERT INTO chain (run_id, idx, kind, ref_id, prev_hash, entry_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (run_id, idx, kind, str(ref_id), prev_hash, digest, utc_now()),
+        )
+        signature = head_hmac(self._hmac_key, run_id, idx, digest)
+        await db.execute(
+            "INSERT INTO chain_heads (run_id, idx, entry_hash, head_hmac, signed) VALUES (?, ?, ?, ?, ?)"
+            " ON CONFLICT(run_id) DO UPDATE SET idx = excluded.idx, entry_hash = excluded.entry_hash,"
+            " head_hmac = excluded.head_hmac, signed = excluded.signed",
+            (run_id, idx, digest, signature, int(signature is not None)),
+        )
 
     @property
     def db(self) -> aiosqlite.Connection:
@@ -141,49 +215,80 @@ class Ledger:
                 batch.append(self._queue.get_nowait())
 
             run_id: str | None = None
-            try:
-                for item in batch:
-                    if item is not None:
-                        run_id, write = item
-                        await write(self.db)
-                await self.db.commit()
-            except Exception:
-                token = run_id_var.set(run_id)
-                logger.exception("Ledger write failed; batch rolled back")
-                run_id_var.reset(token)
-                await self.db.rollback()
-            finally:
-                for _ in batch:
-                    self._queue.task_done()
+            async with self._tx_lock:
+                try:
+                    for item in batch:
+                        if item is not None:
+                            run_id, write = item
+                            await write(self.db)
+                    await self.db.commit()
+                except Exception:
+                    token = run_id_var.set(run_id)
+                    logger.exception("Ledger write failed; batch rolled back")
+                    run_id_var.reset(token)
+                    await self.db.rollback()
+                finally:
+                    for _ in batch:
+                        self._queue.task_done()
 
             if None in batch:
                 return
 
+    async def _transaction(self, run_id: str, work: Callable[[aiosqlite.Connection], Awaitable[Any]]) -> Any:
+        """Run work and commit it as one transaction, holding the run's chain lock throughout."""
+        async with self._tx_lock:
+            try:
+                async with self._chain_lock(run_id):
+                    result = await work(self.db)
+                await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        return result
+
     async def create_run(
         self, *, run_id: str, repo: str, mode: str, via_fork: bool, session_id: str, turn_id: str
     ) -> None:
-        await self.db.execute(
-            "INSERT INTO runs (id, repo, mode, via_fork, session_id, turn_id, status, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, 'running', ?)",
-            (run_id, repo, mode, int(via_fork), session_id, turn_id, utc_now()),
-        )
-        await self.db.execute(
-            "INSERT INTO turns (run_id, turn_id, base_sequence, created_at) VALUES (?, ?, 0, ?)",
-            (run_id, turn_id, utc_now()),
-        )
-        await self.db.commit()
+        row = {
+            "id": run_id,
+            "repo": repo,
+            "mode": mode,
+            "via_fork": int(via_fork),
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "status": "running",
+            "pending_action": None,
+            "created_at": utc_now(),
+        }
+
+        async def work(db: aiosqlite.Connection) -> None:
+            await db.execute(
+                "INSERT INTO runs (id, repo, mode, via_fork, session_id, turn_id, status, pending_action, created_at)"
+                " VALUES (:id, :repo, :mode, :via_fork, :session_id, :turn_id, :status, :pending_action, :created_at)",
+                row,
+            )
+            await db.execute(
+                "INSERT INTO turns (run_id, turn_id, base_sequence, created_at) VALUES (?, ?, 0, ?)",
+                (run_id, turn_id, utc_now()),
+            )
+            await self._chain(db, run_id, "run", run_id, row)
+
+        await self._transaction(run_id, work)
 
     async def begin_turn(self, run_id: str, turn_id: str, base_sequence: int) -> None:
         """Make turn_id the run's current turn, e.g. the turn TrueForge created on resume."""
-        await self.db.execute(
-            "INSERT INTO turns (run_id, turn_id, base_sequence, created_at) VALUES (?, ?, ?, ?)",
-            (run_id, turn_id, base_sequence, utc_now()),
-        )
-        await self.db.execute(
-            "UPDATE runs SET turn_id = ?, status = 'running', pending_action = NULL WHERE id = ?",
-            (turn_id, run_id),
-        )
-        await self.db.commit()
+
+        async def work(db: aiosqlite.Connection) -> None:
+            await db.execute(
+                "INSERT INTO turns (run_id, turn_id, base_sequence, created_at) VALUES (?, ?, ?, ?)",
+                (run_id, turn_id, base_sequence, utc_now()),
+            )
+            await db.execute(
+                "UPDATE runs SET turn_id = ?, status = 'running', pending_action = NULL WHERE id = ?",
+                (turn_id, run_id),
+            )
+
+        await self._transaction(run_id, work)
 
     async def turn_base(self, run_id: str, turn_id: str) -> int:
         cursor = await self.db.execute(
@@ -211,12 +316,25 @@ class Ledger:
             "decided_at": utc_now(),
             "result": result,
         }
-        await self.db.execute(
-            "INSERT INTO approvals (run_id, tool_name, arguments_json, decision, approver, decided_at, result)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (run_id, tool_name, json.dumps(arguments), decision, approver, row["decided_at"], result),
-        )
-        await self.db.commit()
+        source = {
+            "run_id": run_id,
+            "tool_name": tool_name,
+            "arguments_json": json.dumps(arguments),
+            "decision": decision,
+            "approver": approver,
+            "decided_at": row["decided_at"],
+            "result": result,
+        }
+
+        async def work(db: aiosqlite.Connection) -> None:
+            cursor = await db.execute(
+                "INSERT INTO approvals (run_id, tool_name, arguments_json, decision, approver, decided_at, result)"
+                " VALUES (:run_id, :tool_name, :arguments_json, :decision, :approver, :decided_at, :result)",
+                source,
+            )
+            await self._chain(db, run_id, "approval", cursor.lastrowid, source)
+
+        await self._transaction(run_id, work)
         return row
 
     async def accepted_approval(self, run_id: str) -> dict[str, Any] | None:
@@ -241,26 +359,42 @@ class Ledger:
         self, run_id: str, sequence: int, type: str, payload: str, received_at: str | None = None
     ) -> None:
         """Queue one event. payload is the event JSON exactly as streamed; received_at defaults to now."""
-        received_at = received_at or utc_now()
+        source = {
+            "run_id": run_id,
+            "sequence": sequence,
+            "type": type,
+            "payload_json": payload,
+            "received_at": received_at or utc_now(),
+        }
 
+        # Runs in the queued writer, never on the SSE path: hashing costs the stream nothing.
         async def write(db: aiosqlite.Connection) -> None:
-            await db.execute(
-                "INSERT OR IGNORE INTO events (run_id, sequence, type, payload_json, received_at)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (run_id, sequence, type, payload, received_at),
-            )
+            async with self._chain_lock(run_id):
+                cursor = await db.execute(
+                    "INSERT OR IGNORE INTO events (run_id, sequence, type, payload_json, received_at)"
+                    " VALUES (:run_id, :sequence, :type, :payload_json, :received_at)",
+                    source,
+                )
+                if cursor.rowcount == 1:  # a replayed sequence is ignored, so it is not chained twice
+                    await self._chain(db, run_id, "event", sequence, source)
 
         self._queue.put_nowait((run_id, write))
 
     async def append_note(self, run_id: str, kind: str, payload: Any) -> dict[str, Any]:
         """Durably append one note about a run. payload must be JSON serialisable."""
         row = {"kind": kind, "payload": payload, "created_at": utc_now()}
-        cursor = await self.db.execute(
-            "INSERT INTO notes (run_id, kind, payload_json, created_at) VALUES (?, ?, ?, ?)",
-            (run_id, kind, json.dumps(payload), row["created_at"]),
-        )
-        await self.db.commit()
-        return {"id": cursor.lastrowid, **row}
+        source = {"run_id": run_id, "kind": kind, "payload_json": json.dumps(payload), "created_at": row["created_at"]}
+
+        async def work(db: aiosqlite.Connection) -> int:
+            cursor = await db.execute(
+                "INSERT INTO notes (run_id, kind, payload_json, created_at) VALUES (:run_id, :kind, :payload_json, :created_at)",
+                source,
+            )
+            await self._chain(db, run_id, "note", cursor.lastrowid, source)
+            return cursor.lastrowid
+
+        note_id = await self._transaction(run_id, work)
+        return {"id": note_id, **row}
 
     async def get_notes(self, run_id: str, kind: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT id, kind, payload_json, created_at FROM notes WHERE run_id = ?"
