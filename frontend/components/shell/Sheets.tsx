@@ -5,9 +5,14 @@ import { CheckCircle, CircleNotch, Hand, Prohibit, RocketLaunch, X, XCircle } fr
 import clsx from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchLedger, type Ledger } from "@/lib/api";
+import { AgentMessage } from "@/components/chat/AgentText";
+import { helperPhase } from "@/components/chat/Handoff";
+import { ThinkingPill } from "@/components/chat/Thought";
 import { PolicyPanel } from "@/components/features/policy/PolicyPanel";
 import { POLICY } from "@/lib/policy";
 import type { RunState } from "@/lib/state";
+import { useChildren } from "@/lib/use-children";
+import { useRunStream } from "@/lib/use-run-stream";
 
 // Side sheets: occasional, 360ms on the iOS drawer curve, entering and leaving from the right.
 function Sheet({ open, onOpenChange, title, description, width, children }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; width: string; children: ReactNode }) {
@@ -43,7 +48,7 @@ const POLICY_ICON = {
   never: { Icon: Prohibit, className: "text-fail" },
 } as const;
 
-export function PolicySheet({ open, onOpenChange, run }: { open: boolean; onOpenChange: (open: boolean) => void; run: RunState | null }) {
+export function PolicySheet({ open, onOpenChange, run, onOpenRun }: { open: boolean; onOpenChange: (open: boolean) => void; run: RunState | null; onOpenRun?: (runId: string) => void }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange} title="Policy" description="What the agent may do in every run." width="w-[440px]">
       <div className="flex flex-col gap-7">
@@ -66,7 +71,7 @@ export function PolicySheet({ open, onOpenChange, run }: { open: boolean; onOpen
             </section>
           );
         })}
-        <PolicyPanel variant="run" run={run} />
+        <PolicyPanel variant="run" run={run} onOpenRun={onOpenRun} />
         <p className="rounded-[var(--radius-card)] border border-line bg-card px-4 py-3 text-[0.85rem] leading-relaxed text-fg">
           The backend revalidates every approval before anything merges.
         </p>
@@ -92,11 +97,48 @@ function eventSummary(type: string, payload: Record<string, unknown>): string {
   return "";
 }
 
-export function LedgerDrawer({ runId, open, onOpenChange }: { runId: string | null; open: boolean; onOpenChange: (open: boolean) => void }) {
+export function LedgerDrawer({ runId, reportRunId, open, onOpenChange }: { runId: string | null; reportRunId?: string | null; open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange} title="Audit ledger" description="Append only record of every event and every approval attempt for this run." width="w-[560px]">
-      {runId ? <LedgerTimeline key={runId} runId={runId} /> : <p className="text-[0.9rem] text-fg-muted">Start or open a run to see its ledger.</p>}
+      {runId ? (
+        <div className="flex flex-col gap-7">
+          <AuditReport key={runId} runId={runId} requested={reportRunId ?? null} />
+          <LedgerTimeline key={`ledger:${runId}`} runId={runId} />
+        </div>
+      ) : (
+        <p className="text-[0.9rem] text-fg-muted">Start or open a run to see its ledger.</p>
+      )}
     </Sheet>
+  );
+}
+
+/** The auditor agent's report on this run, streamed from its own run: the one just requested, else the latest. */
+function AuditReport({ runId, requested }: { runId: string; requested: string | null }) {
+  const children = useChildren(runId, requested !== null);
+  const auditors = children.filter((c) => c.role === "auditor");
+  const child = auditors.find((c) => c.runId === requested) ?? auditors[auditors.length - 1] ?? null;
+  const auditorRunId = requested ?? child?.runId ?? null;
+  const report = useRunStream(auditorRunId, "auditor", "", auditorRunId !== null);
+  if (!auditorRunId) return null;
+
+  const phase = child ? helperPhase(child.status) : "running";
+  const working = report?.status.working ?? phase === "running";
+  const texts = report?.blocks.filter((b) => b.kind === "text") ?? [];
+  const stopped = report?.failure ?? null;
+
+  return (
+    <section aria-live="polite">
+      <h3 className="font-display text-[1rem] font-semibold text-fg">Audit report</h3>
+      <p className="mt-1 text-[0.8rem] text-fg-subtle">Written by the auditor agent from this ledger. It reads the export and never changes anything.</p>
+      <div className="mt-4 flex flex-col gap-3 rounded-[var(--radius-card)] border border-line bg-card px-4 py-4">
+        {texts.length === 0 && working && <ThinkingPill label="Writing the report…" />}
+        {texts.map((block, i) => (
+          <AgentMessage key={block.id} text={block.kind === "text" ? block.text : ""} live={working && i === texts.length - 1} />
+        ))}
+        {stopped && <p className="text-[0.85rem] text-fg-muted">The auditor stopped before it finished the report. {stopped.reason}</p>}
+        {!working && !stopped && texts.length === 0 && <p className="text-[0.85rem] text-fg-muted">The auditor finished without writing a report.</p>}
+      </div>
+    </section>
   );
 }
 

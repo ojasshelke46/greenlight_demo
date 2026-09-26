@@ -1,8 +1,12 @@
 "use client";
 
-import { ArrowSquareOut } from "@phosphor-icons/react";
+import { ArrowSquareOut, CaretDown } from "@phosphor-icons/react";
+import clsx from "clsx";
 import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useState } from "react";
+import { AgentText, withoutThoughts } from "@/components/chat/AgentText";
+import { helperPhase } from "@/components/chat/Handoff";
+import type { ChildRun } from "@/lib/state";
 
 export type RunReceipt = {
   advisories_fixed: number;
@@ -56,7 +60,46 @@ function isReceipt(value: unknown): value is RunReceipt {
   return typeof v?.advisories_fixed === "number" && typeof v.model_calls === "number" && (v.source === "gateway" || v.source === "events");
 }
 
-export function Receipt({ runId }: { runId: string }) {
+/** The receipt agent's words under the receipt line, folded by default. */
+function Breakdown({ helper }: { helper: ChildRun }) {
+  const [open, setOpen] = useState(false);
+  const phase = helperPhase(helper.status);
+  const raw = typeof helper.result?.raw === "string" ? helper.result.raw : null;
+  const text = raw !== null ? withoutThoughts(raw).trim() : helper.result ? JSON.stringify(helper.result, null, 2) : "";
+  const ready = phase === "done" && text !== "";
+
+  if (!ready) {
+    return (
+      <p className="flex items-center gap-2 text-[0.85rem] text-fg-subtle">
+        {phase === "running" && <span aria-hidden className="dot-pulse size-2 rounded-full bg-progress shadow-[0_0_10px_rgb(255_176_32/0.6)]" />}
+        {phase === "failed" ? "The receipt agent stopped before it wrote a breakdown" : phase === "done" ? "The receipt agent wrote no breakdown" : "Writing the breakdown"}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex w-fit items-center gap-2 rounded-full py-1 text-[0.88rem] font-medium text-fg-muted transition-colors duration-150 hover:text-fg"
+      >
+        <CaretDown weight="bold" className={clsx("size-3.5 transition-transform duration-200 ease-[var(--ease-out)]", !open && "-rotate-90")} aria-hidden />
+        Breakdown
+      </button>
+      {/* Accordion: height is the one tolerated layout animation. Grid rows keep it off JS; 240ms ease out. */}
+      <div className={clsx("grid transition-[grid-template-rows] duration-[240ms] ease-[var(--ease-out)] motion-reduce:transition-none", open ? "grid-rows-[1fr]" : "grid-rows-[0fr]")}>
+        <div className="min-h-0 overflow-hidden">
+          <div className="mt-2 border-l border-line pl-4">
+            <AgentText text={text} />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function Receipt({ runId, breakdown = null }: { runId: string; breakdown?: ChildRun | null }) {
   const reduce = useReducedMotion();
   const [phase, setPhase] = useState<Phase>({ kind: "tallying" });
 
@@ -142,6 +185,7 @@ export function Receipt({ runId }: { runId: string }) {
           <ArrowSquareOut weight="bold" className="size-4" aria-hidden />
         </a>
       )}
+      {breakdown && <Breakdown helper={breakdown} />}
     </motion.div>
   );
 }

@@ -398,6 +398,7 @@ export class RunModel {
 
     for (const messageId of this.order) {
       const message = this.messages.get(messageId)!;
+      const firstBlock = blocks.length;
       const text = message.content.trim();
       if (text) {
         blocks.push({ kind: "text", id: `${messageId}:text`, text });
@@ -546,6 +547,7 @@ export class RunModel {
           .join("  ");
         blocks.push({ kind: "action", id: `${key}:action`, server: resolved.server, tool: resolved.name, target, running: !response && !stopped, stopped, error: failure });
       }
+      for (let i = firstBlock; i < blocks.length; i++) blocks[i].at ??= message.at;
     }
 
     // Steps
@@ -609,7 +611,8 @@ export class RunModel {
       }
     }
 
-    const steps: Step[] = order.map(([id, label]) => ({ id, label, status: "waiting", ...facts[id] }));
+    // Helper agents (scout, policy, prover, receipt, auditor) do not follow the fixer's pipeline.
+    const steps: Step[] = this.meta.role === "fixer" ? order.map(([id, label]) => ({ id, label, status: "waiting", ...facts[id] })) : this.helperSteps(blocks);
 
     if (vulnBlock) {
       vulnBlock.items = (vulnerabilities ?? []).map((v): Vulnerability =>
@@ -661,10 +664,38 @@ export class RunModel {
     };
   }
 
+  /** Generic steps for a helper agent, each from the blocks its events produced. */
+  private helperSteps(blocks: Block[]): Step[] {
+    const end = this.turnEnd;
+    const actions = blocks.filter((b): b is Extract<Block, { kind: "action" }> => b.kind === "action");
+    const commands = blocks.flatMap((b) => (b.kind === "terminal" ? b.commands : []));
+    const toolRunning = actions.some((a) => a.running) || commands.some((c) => c.running);
+    const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+    const tool = (count: number, running: boolean, detail: string): Pick<Step, "status" | "detail" | "tone"> =>
+      count === 0 ? { status: "waiting" } : running ? { status: "active", detail: "Working", tone: "progress" } : { status: "done", detail, tone: "done" };
+
+    const report: Pick<Step, "status" | "detail" | "tone"> = end
+      ? end.status === "done"
+        ? { status: "done", detail: "Reported", tone: "done" }
+        : this.userPaused
+          ? { status: "paused", detail: "Paused here", tone: "progress" }
+          : { status: "failed", detail: "Stopped here", tone: "fail" }
+      : this.turnsStarted > 0 && !toolRunning
+        ? { status: "active", detail: "Thinking", tone: "progress" }
+        : { status: "waiting" };
+
+    return [
+      { id: "scan", label: "Started", ...(this.turnsStarted > 0 ? { status: "done", startedAt: this.startedAt ?? undefined } : { status: "active", detail: "Waking the agent", tone: "progress" }) },
+      { id: "pull_request", label: "GitHub", ...tool(actions.length, actions.some((a) => a.running), plural(actions.length, "call", "calls")) },
+      { id: "sandbox", label: "Sandbox", ...tool(commands.length, commands.some((c) => c.running), plural(commands.length, "command", "commands")) },
+      { id: "handed_off", label: "Report", ...report },
+    ];
+  }
+
   private failure(steps: Step[], explanation: string | null, prOpen: boolean): Failure | null {
     const end = this.turnEnd;
     if (!end) return null;
-    if (end.status === "done" && (prOpen || this.pendingRefs)) return null;
+    if (end.status === "done" && (prOpen || this.pendingRefs || this.meta.role !== "fixer")) return null;
     const failed = steps.find((s) => s.status === "failed");
     const reason =
       end.status === "done"
@@ -693,6 +724,7 @@ export class RunModel {
     if (approval.status === "decided" && approval.decision === "reject" && end) return { tone: "fail", working: false, label: "Merge rejected", detail: "The pull request stays open" };
     if (end && end.status !== "done") return { tone: "fail", working: false, label: "Run stopped", detail: end.reason === "server-execution-timeout" ? "TrueForge hit its turn time limit" : end.message ?? "The agent stopped" };
     if (pending && this.paused) return { tone: "progress", working: false, label: "Awaiting approval", detail: pending.pullNumber !== null ? `Merge PR #${pending.pullNumber}` : `Approve ${pending.tool}` };
+    if (end && this.meta.role !== "fixer") return { tone: "done", working: false, label: "Done", detail: "Report ready" };
     if (end) return prOpen ? { tone: "done", working: false, label: "Pull request open", detail: "Ready for review" } : { tone: "fail", working: false, label: "Run ended", detail: "No pull request was opened" };
     if (this.turnsStarted === 0) return { tone: "progress", working: true, label: "Starting", detail: "Waking the agent" };
     return { tone: "progress", working: true, label: "Working", detail: current ?? "Thinking" };

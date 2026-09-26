@@ -1,8 +1,9 @@
 "use client";
 
-import { Check, DownloadSimple, Warning } from "@phosphor-icons/react";
+import { Check, CircleNotch, DownloadSimple, Notebook, Warning } from "@phosphor-icons/react";
 import { motion, useReducedMotion } from "motion/react";
 import { useEffect, useState } from "react";
+import { ApiError, requestAuditReport } from "@/lib/api";
 
 export type VerifyResult = {
   ok: boolean;
@@ -93,7 +94,41 @@ function ExportLink({ runId, format, label }: { runId: string; format: "md" | "j
   );
 }
 
-export function AuditPanel({ runId }: { runId: string }) {
+/** Starts the auditor on this run's export; its report streams into the ledger drawer. */
+function ReportButton({ runId, onReport }: { runId: string; onReport: (auditorRunId: string) => void }) {
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <>
+      <button
+        type="button"
+        disabled={starting}
+        onClick={async () => {
+          setStarting(true);
+          setError(null);
+          try {
+            onReport(await requestAuditReport(runId));
+          } catch (e) {
+            setError(e instanceof ApiError ? e.message : "Could not start the auditor");
+          } finally {
+            setStarting(false);
+          }
+        }}
+        className="inline-flex h-9 items-center gap-1.5 rounded-full border border-accent/40 bg-accent/[0.07] px-3.5 text-[0.88rem] font-medium text-accent transition-[background-color,transform] duration-150 ease-out hover:bg-accent/15 active:scale-[0.97] disabled:cursor-wait disabled:opacity-60"
+      >
+        {starting ? <CircleNotch weight="bold" className="size-4 animate-spin motion-reduce:animate-none" aria-hidden /> : <Notebook weight="bold" className="size-4" aria-hidden />}
+        {starting ? "Starting the auditor" : "Generate audit report"}
+      </button>
+      {error && (
+        <p role="alert" className="basis-full text-[0.85rem] text-fail">
+          {error}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function AuditPanel({ runId, onReport }: { runId: string; onReport?: (auditorRunId: string) => void }) {
   const reduce = useReducedMotion();
   const [phase, setPhase] = useState<Phase>({ kind: "checking" });
 
@@ -137,6 +172,7 @@ export function AuditPanel({ runId }: { runId: string }) {
     >
       <VerifyLine result={phase.result} />
       <div className="flex flex-wrap gap-2">
+        {onReport && <ReportButton runId={runId} onReport={onReport} />}
         <ExportLink runId={runId} format="md" label="Export report" />
         <ExportLink runId={runId} format="json" label="Export raw" />
       </div>

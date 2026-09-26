@@ -8,6 +8,34 @@ import type { FeaturesState } from "./features";
 export type Tone = "fail" | "progress" | "done";
 export type Mode = "ship" | "pr_only";
 
+// TrueForge agents by role. Fixer, scout and policy start from the chat; the rest are started by Greenlight.
+export type Role = "fixer" | "prover" | "policy" | "scout" | "receipt" | "auditor";
+export type ChatRole = "fixer" | "scout" | "policy";
+export const CHAT_ROLES: ChatRole[] = ["fixer", "scout", "policy"];
+
+export const ROLE_LABEL: Record<Role, string> = {
+  fixer: "Fix",
+  prover: "Prover",
+  policy: "Policy",
+  scout: "Scout",
+  receipt: "Receipt",
+  auditor: "Auditor",
+};
+
+export type AgentInfo = { role: Role; name: string; model: string | null; found: boolean; chat: boolean };
+
+/** A helper agent run started by a run, as GET /api/runs/<id>/children reports it. */
+export type ChildRun = {
+  runId: string;
+  role: Role;
+  purpose: string | null;
+  // running, awaiting_approval, awaiting_input, done, error, cancelled, resume_failed, or missing
+  status: string;
+  createdAt: string;
+  // The helper's parsed final json block, or {parse_error: true, raw} when it had none.
+  result: Record<string, unknown> | null;
+};
+
 export type AccessInfo = {
   repo: string;
   private: boolean;
@@ -87,13 +115,17 @@ export type PullRequest = {
   fromFork: boolean;
 };
 
-export type Block =
+export type Block = (
   | { kind: "text"; id: string; text: string }
   | { kind: "terminal"; id: string; commands: TerminalCommand[] }
   | { kind: "action"; id: string; server: string | null; tool: string; target: string; running: boolean; stopped: boolean; error: string | null }
   | { kind: "vulns"; id: string; items: Vulnerability[] }
   | { kind: "diff"; id: string; files: DiffFile[] }
-  | { kind: "pr"; id: string; pr: PullRequest };
+  | { kind: "pr"; id: string; pr: PullRequest }
+) & {
+  // When the agent message that produced the block started, in ms since epoch.
+  at?: number;
+};
 
 export type RunStatus = {
   tone: Tone;
@@ -135,6 +167,7 @@ export type Release = {
 
 export type RunMeta = {
   id: string;
+  role: Role;
   repo: string;
   mode: Mode;
   viaFork: boolean;
@@ -174,6 +207,7 @@ export type RunState = RunMeta & {
 
 export type RunSummary = {
   id: string;
+  role: Role;
   repo: string;
   mode: Mode;
   viaFork: boolean;

@@ -3,7 +3,9 @@
 import { ShieldCheck, ShieldWarning } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { motion, useReducedMotion, type Transition } from "motion/react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { withoutThoughts } from "@/components/chat/AgentText";
+import { fetchVerification, type Verification } from "@/lib/api";
 import type { AdvisoryProof, ProofPhase, ProofVerdict } from "@/lib/features/proof";
 import type { RunState } from "@/lib/state";
 
@@ -23,7 +25,14 @@ const GHSA = /^GHSA(-[a-z0-9]{4}){3}$/i;
 
 export function ProofPanel({ variant, run }: ProofPanelProps) {
   const advisories = run?.features.proof.advisories ?? [];
-  if (variant === "approval") return <ApprovalLine advisories={advisories} />;
+  if (variant === "approval") {
+    return (
+      <>
+        <ApprovalLine advisories={advisories} />
+        {run && <VerificationLine runId={run.id} />}
+      </>
+    );
+  }
   return <RunPanel advisories={advisories} working={Boolean(run?.status.working)} />;
 }
 
@@ -259,6 +268,86 @@ function ApprovalLine({ advisories }: { advisories: AdvisoryProof[] }) {
         {proven.length > 0 && (
           <span>
             <span className="font-medium text-accent">Proven fixed:</span> <List ids={proven} /> reproduced, then closed.
+          </span>
+        )}
+      </span>
+    </p>
+  );
+}
+
+const VERIFY_POLL_MS = 3000;
+
+/** Why a prover could not verify, in its own words when it gave any. */
+function proverReason(verification: Verification): string {
+  for (const prover of verification.provers) {
+    if (prover.state !== "error" && prover.state !== "inconclusive") continue;
+    const result = prover.result;
+    if (!result) return `the prover run ${prover.run_status === "done" ? "ended without a result" : "stopped"}`;
+    if (result.parse_error) {
+      const raw = typeof result.raw === "string" ? withoutThoughts(result.raw).trim() : "";
+      return raw ? raw.split("\n").filter(Boolean).pop()!.slice(0, 200) : "the prover gave no readable result";
+    }
+    if (result.before === "error" || result.after === "error") return "the proof test could not run";
+    return `the proof test ${result.before === "pass" ? "passed" : "did not fail"} before the fix`;
+  }
+  return "no result";
+}
+
+/** One line under the proof line: what the independent prover agent found for this run's PR. */
+function VerificationLine({ runId }: { runId: string }) {
+  const [verification, setVerification] = useState<Verification | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        const next = await fetchVerification(runId, controller.signal);
+        if (controller.signal.aborted) return;
+        setVerification(next);
+        if (next.status !== "running") return;
+      } catch {
+        if (controller.signal.aborted) return;
+      }
+      timer = setTimeout(tick, VERIFY_POLL_MS);
+    };
+    void tick();
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [runId]);
+
+  if (!verification) return null;
+  const advisories = verification.provers.map((p) => p.advisory).filter((a): a is string => Boolean(a));
+  const { status } = verification;
+  const tone = status === "still_exploitable" ? "text-fail" : status === "proven" ? "text-accent" : status === "running" ? "text-progress" : "text-fg-muted";
+  const Icon = status === "proven" ? ShieldCheck : ShieldWarning;
+
+  return (
+    <p className="mt-2 flex items-start gap-2 text-[0.88rem] leading-relaxed text-fg">
+      <Icon weight="bold" className={clsx("mt-[3px] size-4 shrink-0", tone)} aria-hidden />
+      <span>
+        {status === "none" && <span className="text-fg-muted">No independent verification ran for this PR.</span>}
+        {status === "running" && (
+          <span>
+            <span className="font-medium text-progress">Independent verification running</span>
+            {advisories.length > 0 && <> for <List ids={advisories} /></>}.
+          </span>
+        )}
+        {status === "proven" && (
+          <span>
+            <span className="font-medium text-accent">Independently verified:</span> the proof test failed before the fix and passes after it.
+          </span>
+        )}
+        {status === "still_exploitable" && (
+          <span>
+            <span className="font-medium text-fail">Independent verification: still exploitable.</span> The proof test still fails after the fix.
+          </span>
+        )}
+        {(status === "error" || status === "inconclusive") && (
+          <span className="text-fg-muted">
+            <span className="font-medium">Couldn&apos;t verify independently:</span> {proverReason(verification)}
           </span>
         )}
       </span>

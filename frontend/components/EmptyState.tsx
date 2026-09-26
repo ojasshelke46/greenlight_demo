@@ -1,7 +1,7 @@
 "use client";
 
-import { GitMerge, GitPullRequest, ShieldCheck } from "@phosphor-icons/react";
-import type { Mode } from "@/lib/state";
+import { Binoculars, GitMerge, ListChecks } from "@phosphor-icons/react";
+import type { ChatRole } from "@/lib/state";
 import { Orb } from "./Orb";
 
 export function Hero({ userName }: { userName: string }) {
@@ -16,20 +16,21 @@ export function Hero({ userName }: { userName: string }) {
   );
 }
 
-const SUGGESTIONS: { title: [string, string]; description: string; Icon: typeof ShieldCheck; mode: Mode | null }[] = [
-  { title: ["Scan a repo", "for vulnerabilities"], description: "npm audit, checked on OSV", Icon: ShieldCheck, mode: null },
-  { title: ["Fix and ship", "with your approval"], description: "Merges only on your hold", Icon: GitMerge, mode: "ship" },
-  { title: ["Open a PR", "on any public repo"], description: "Forks when it has to", Icon: GitPullRequest, mode: "pr_only" },
+// Each card starts the chat with the agent that does it.
+const SUGGESTIONS: { title: [string, string]; description: string; Icon: typeof GitMerge; agent: ChatRole }[] = [
+  { title: ["Fix and ship", "with proof"], description: "A prover checks every fix", Icon: GitMerge, agent: "fixer" },
+  { title: ["Sweep a fleet", "find the worst repo"], description: "Ranks repos by risk", Icon: Binoculars, agent: "scout" },
+  { title: ["Set the rules", "draft a policy"], description: "Approvers and freezes", Icon: ListChecks, agent: "policy" },
 ];
 
-export function Suggestions({ onPick }: { onPick: (mode: Mode | null) => void }) {
+export function Suggestions({ onPick }: { onPick: (agent: ChatRole) => void }) {
   return (
     <div className="mx-auto grid w-full max-w-3xl grid-cols-1 gap-3 px-5 sm:grid-cols-3">
-      {SUGGESTIONS.map(({ title, description, Icon, mode }) => (
+      {SUGGESTIONS.map(({ title, description, Icon, agent }) => (
         <button
           key={title[0]}
           type="button"
-          onClick={() => onPick(mode)}
+          onClick={() => onPick(agent)}
           className="group flex items-center gap-3.5 rounded-[var(--radius-card)] border border-line bg-panel/90 p-3.5 text-left transition-[border-color,background-color] duration-150 ease-out hover:border-line-strong hover:bg-card active:scale-[0.99]"
         >
           <span className="grid size-11 shrink-0 place-items-center rounded-full border border-accent/25 bg-accent/10 text-accent">

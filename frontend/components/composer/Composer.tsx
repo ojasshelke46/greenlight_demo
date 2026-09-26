@@ -1,14 +1,29 @@
 "use client";
 
-import { ArrowsLeftRight, CircleNotch, Cpu, GitFork, Globe, Handshake, LockSimple, Paperclip, Pause, Warning } from "@phosphor-icons/react";
+import { Menu } from "@base-ui/react/menu";
+import { ArrowsLeftRight, Binoculars, CaretDown, Check, CircleNotch, Cpu, GitFork, Globe, Handshake, ListChecks, LockSimple, Paperclip, Pause, Warning, Wrench } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { forwardRef, type KeyboardEvent } from "react";
 import { Tip } from "@/components/Tip";
 import AnimatedGenerateButton from "@/components/ui/animated-generate-button-shadcn-tailwind";
-import { MODE_LABEL, type AccessState, type Mode } from "@/lib/state";
+import { CHAT_ROLES, MODE_LABEL, ROLE_LABEL, type AccessState, type AgentInfo, type ChatRole, type Mode } from "@/lib/state";
+
+/** A line above the textarea for agents without an access check: what the input resolved to, or why not. */
+export type ComposerNote = { tone: "ok" | "error" | "muted"; text: string };
+
+const AGENT_COPY: Record<ChatRole, { Icon: typeof Wrench; description: string; placeholder: string; hint: string }> = {
+  fixer: { Icon: Wrench, description: "Fixes a vulnerable dependency and opens a PR", placeholder: "Paste a GitHub repo link or ask anything", hint: "Paste a GitHub repo link to start a run" },
+  scout: { Icon: Binoculars, description: "Ranks many repos by risk. Read only", placeholder: "org:name, user:name, or GitHub repo links", hint: "Try org:name, user:name, or repo links" },
+  policy: { Icon: ListChecks, description: "Drafts a .greenlight.yml for a repo", placeholder: "Paste a GitHub repo link to draft its policy", hint: "Paste a GitHub repo link to draft its policy" },
+};
 
 type Props = {
+  agent: ChatRole;
+  onAgentChange: (agent: ChatRole) => void;
+  // From GET /api/agents; null while loading.
+  agents: AgentInfo[] | null;
+  note: ComposerNote | null;
   text: string;
   onTextChange: (text: string) => void;
   hasRepo: boolean;
@@ -34,13 +49,15 @@ const chipMotion = {
 } as const;
 
 export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer(
-  { text, onTextChange, hasRepo, access, mode, onModeChange, canSend, sending, error, onSend, agentWorking, pausing, onPause },
+  { agent, onAgentChange, agents, note, text, onTextChange, hasRepo, access, mode, onModeChange, canSend, sending, error, onSend, agentWorking, pausing, onPause },
   ref,
 ) {
   const reduce = useReducedMotion();
   const chip = reduce ? { ...chipMotion, initial: { opacity: 0 }, exit: { opacity: 0 } } : chipMotion;
   const ready = access.status === "ready" ? access.access : null;
   const shipAllowed = ready ? ready.modeOptions.includes("ship") : true;
+  const fix = agent === "fixer";
+  const copy = AGENT_COPY[agent];
 
   const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -53,33 +70,46 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
     <div className="composer rounded-[var(--radius-composer)] border border-line bg-[#090909]/95 p-3 shadow-[0_24px_60px_-20px_rgb(0_0_0/0.8)] backdrop-blur-sm">
       <div className="flex flex-wrap items-center gap-2 px-2 pt-1 empty:hidden" aria-live="polite">
         <AnimatePresence mode="popLayout" initial={false}>
-          {access.status === "checking" && (
+          {fix && access.status === "checking" && (
             <motion.span key="checking" {...chip} className="inline-flex h-8 items-center gap-2 rounded-full border border-line bg-card px-3 text-[0.82rem] text-fg-muted">
               <CircleNotch weight="bold" className="size-3.5 animate-spin text-accent motion-reduce:animate-none" aria-hidden />
               Checking access to <span className="font-mono text-fg">{access.repo}</span>
             </motion.span>
           )}
-          {ready && (
+          {fix && ready && (
             <motion.span key={`access:${ready.repo}`} {...chip} className="inline-flex h-8 items-center gap-2 rounded-full border border-line bg-card px-3 text-[0.82rem] text-fg">
               {ready.collaborator ? <Handshake weight="bold" className="size-4 text-accent" aria-hidden /> : <GitFork weight="bold" className="size-4 text-fg-muted" aria-hidden />}
               {ready.collaborator ? "Collaborator: can ship after your approval" : "Not a collaborator: will fork and open a PR"}
             </motion.span>
           )}
-          {ready && (
+          {fix && ready && (
             <motion.span key={`vis:${ready.repo}`} {...chip} className="inline-flex h-8 items-center gap-1.5 rounded-full border border-line px-3 text-[0.82rem] text-fg-muted">
               {ready.private ? <LockSimple weight="bold" className="size-3.5" aria-hidden /> : <Globe weight="bold" className="size-3.5" aria-hidden />}
               {ready.private ? "Private" : "Public"}
             </motion.span>
           )}
-          {access.status === "error" && (
+          {fix && access.status === "error" && (
             <motion.span key="error" {...chip} className="inline-flex h-8 items-center gap-2 rounded-full border border-fail/30 bg-fail/10 px-3 text-[0.82rem] text-fail">
               <Warning weight="bold" className="size-4" aria-hidden />
               {access.message}
             </motion.span>
           )}
-          {access.status === "idle" && text.trim() !== "" && !hasRepo && (
+          {fix && access.status === "idle" && text.trim() !== "" && !hasRepo && (
             <motion.span key="hint" {...chip} className="inline-flex h-8 items-center px-1 text-[0.82rem] text-fg-subtle">
-              Paste a GitHub repo link to start a run
+              {copy.hint}
+            </motion.span>
+          )}
+          {!fix && note && (
+            <motion.span
+              key={`note:${note.text}`}
+              {...chip}
+              className={clsx(
+                "inline-flex h-8 items-center gap-2 rounded-full border px-3 text-[0.82rem]",
+                note.tone === "error" ? "border-fail/30 bg-fail/10 text-fail" : note.tone === "ok" ? "border-line bg-card text-fg" : "border-transparent px-1 text-fg-subtle",
+              )}
+            >
+              {note.tone === "error" && <Warning weight="bold" className="size-4" aria-hidden />}
+              {note.text}
             </motion.span>
           )}
         </AnimatePresence>
@@ -95,7 +125,7 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
         value={text}
         onChange={(event) => onTextChange(event.target.value)}
         onKeyDown={onKeyDown}
-        placeholder="Paste a GitHub repo link or ask anything"
+        placeholder={copy.placeholder}
         spellCheck={false}
         className="block max-h-48 min-h-14 w-full resize-none bg-transparent px-3 py-3 text-[1.05rem] leading-relaxed text-fg outline-none focus-visible:outline-none [field-sizing:content] placeholder:text-fg-subtle"
       />
@@ -112,14 +142,9 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
           </button>
         </Tip>
 
-        <Tip label="The agent runs on TrueForge with this model">
-          <span tabIndex={0} aria-label="Model: DeepSeek V4 Pro" className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-line bg-card px-2.5 text-[0.82rem] text-fg-muted sm:px-3">
-            <Cpu weight="bold" className="size-4 text-accent" aria-hidden />
-            <span className="hidden sm:inline">DeepSeek V4 Pro</span>
-          </span>
-        </Tip>
-
-        <ModeChip mode={mode} onModeChange={onModeChange} shipAllowed={shipAllowed} repo={ready?.repo ?? null} />
+        <AgentChip agent={agent} onAgentChange={onAgentChange} agents={agents} />
+        <ModelChip info={agents?.find((a) => a.role === agent) ?? null} loading={agents === null} />
+        {fix && <ModeChip mode={mode} onModeChange={onModeChange} shipAllowed={shipAllowed} repo={ready?.repo ?? null} />}
 
         <div className="ml-auto flex min-w-0 items-center gap-3">
           {error && (
@@ -181,4 +206,62 @@ function ModeChip({ mode, onModeChange, shipAllowed, repo }: { mode: Mode; onMod
     return <Tip label={`Ship it needs push access. The bot is not a collaborator on ${repo}, so this run can only open a PR.`}>{chip}</Tip>;
   }
   return <Tip label={mode === "ship" ? "Merges after your approval. Click for PR only." : "Opens a pull request and stops. Click for Ship it."}>{chip}</Tip>;
+}
+
+// The agent menu opens a few times a session: 150ms from its trigger, strong ease out, like the run menu.
+function AgentChip({ agent, onAgentChange, agents }: { agent: ChatRole; onAgentChange: (agent: ChatRole) => void; agents: AgentInfo[] | null }) {
+  const { Icon } = AGENT_COPY[agent];
+  const startable = CHAT_ROLES.filter((role) => agents?.find((a) => a.role === role)?.chat ?? true);
+  return (
+    <Menu.Root>
+      <Menu.Trigger
+        aria-label={`Agent: ${ROLE_LABEL[agent]}. Change agent`}
+        className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-line bg-card px-2.5 text-[0.82rem] font-medium text-fg transition-colors duration-150 hover:border-line-strong data-popup-open:border-line-strong sm:px-3"
+      >
+        <Icon weight="bold" className="size-4 text-accent" aria-hidden />
+        {ROLE_LABEL[agent]}
+        <CaretDown weight="bold" className="size-3.5 text-fg-subtle" aria-hidden />
+      </Menu.Trigger>
+      <Menu.Portal>
+        <Menu.Positioner side="top" sideOffset={8} align="start" className="z-50 outline-none">
+          <Menu.Popup className="min-w-64 origin-[var(--transform-origin)] rounded-xl border border-line-strong bg-raised p-1 shadow-2xl outline-none transition-[transform,opacity] duration-150 ease-[var(--ease-out)] data-ending-style:scale-[0.97] data-ending-style:opacity-0 data-starting-style:scale-[0.97] data-starting-style:opacity-0 motion-reduce:data-ending-style:scale-100 motion-reduce:data-starting-style:scale-100">
+            {startable.map((role) => {
+              const { Icon: RoleIcon, description } = AGENT_COPY[role];
+              return (
+                <Menu.Item key={role} onClick={() => onAgentChange(role)} className="flex cursor-default items-start gap-3 rounded-lg px-3 py-2 outline-none select-none data-highlighted:bg-card">
+                  <RoleIcon weight="bold" className="mt-0.5 size-4 shrink-0 text-fg-muted" aria-hidden />
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-[0.85rem] font-medium text-fg">{ROLE_LABEL[role]}</span>
+                    <span className="block text-[0.78rem] text-fg-subtle">{description}</span>
+                  </span>
+                  {role === agent && <Check weight="bold" className="mt-0.5 size-4 shrink-0 text-accent" aria-hidden />}
+                </Menu.Item>
+              );
+            })}
+          </Menu.Popup>
+        </Menu.Positioner>
+      </Menu.Portal>
+    </Menu.Root>
+  );
+}
+
+/** The selected agent's real model, as TrueForge has it configured. */
+function ModelChip({ info, loading }: { info: AgentInfo | null; loading: boolean }) {
+  const missing = !loading && (!info || !info.found);
+  const label = loading ? "Loading model" : missing ? "Agent not found" : (info?.model ?? "Model not set");
+  return (
+    <Tip label={missing ? `TrueForge has no agent named ${info?.name ?? "for this role"}` : `The ${info?.name ?? ""} agent runs on TrueForge with this model`}>
+      <span
+        tabIndex={0}
+        aria-label={`Model: ${label}`}
+        className={clsx(
+          "inline-flex h-9 min-w-0 shrink items-center gap-2 rounded-full border border-line bg-card px-2.5 text-[0.82rem] sm:px-3",
+          missing ? "text-fail" : "text-fg-muted",
+        )}
+      >
+        {missing ? <Warning weight="bold" className="size-4 shrink-0" aria-hidden /> : <Cpu weight="bold" className="size-4 shrink-0 text-accent" aria-hidden />}
+        <span className="hidden truncate font-mono text-[0.78rem] sm:inline">{label}</span>
+      </span>
+    </Tip>
+  );
 }

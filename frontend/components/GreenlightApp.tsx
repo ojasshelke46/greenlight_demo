@@ -6,19 +6,38 @@ import clsx from "clsx";
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Conversation } from "@/components/chat/Conversation";
-import { Composer } from "@/components/composer/Composer";
+import { Composer, type ComposerNote } from "@/components/composer/Composer";
 import { Hero, Suggestions } from "@/components/EmptyState";
 import { LedgerDrawer, PolicySheet } from "@/components/shell/Sheets";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
-import { ApiError, fetchAccess, fetchHealth, fetchRun, fetchRuns, startRun } from "@/lib/api";
+import { ApiError, fetchAccess, fetchAgents, fetchHealth, fetchRun, fetchRuns, startAgentRun, type StartRequest } from "@/lib/api";
 import { useApproval } from "@/lib/features/approval";
-import { findRepoUrl, type AccessState, type Mode, type RunMeta, type RunSummary } from "@/lib/state";
+import { usePolicy } from "@/lib/features/policy";
+import { findRepoUrl, type AccessState, type AgentInfo, type ChatRole, type Mode, type RunMeta, type RunSummary } from "@/lib/state";
 import { useRun } from "@/lib/use-run";
 
 const USER_NAME = process.env.NEXT_PUBLIC_USER_NAME || "there";
 const DEMO_REPO = process.env.NEXT_PUBLIC_DEMO_REPO || "";
+const DEMO_OWNER = findRepoUrl(DEMO_REPO)?.repo.split("/")[0] ?? "";
+
+/** The backend's key for a scout target: org:name and user:name as typed, repo links as repos:owner/name,… */
+function scoutKey(target: string): string {
+  if (OWNER_TARGET.test(target)) return target.toLowerCase();
+  return `repos:${target.split(",").map((url) => findRepoUrl(url)?.repo ?? url).join(",")}`;
+}
 const ACCESS_DEBOUNCE_MS = 350;
+const POLICY_MAX_AGE_MS = 15_000;
+const OWNER_TARGET = /^(org|user):([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))$/i;
+const REPO_URLS = /https:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]+/g;
+
+/** A scout target from free text: org:name, user:name, or every GitHub repo link in it, comma separated. */
+function scoutTarget(text: string): string | null {
+  const trimmed = text.trim();
+  if (OWNER_TARGET.test(trimmed)) return trimmed;
+  const repos = Array.from(new Set((trimmed.match(REPO_URLS) ?? []).map((url) => findRepoUrl(url)?.url).filter((u): u is string => Boolean(u))));
+  return repos.length > 0 ? repos.join(",") : null;
+}
 
 // Hero and suggestions leave by fading and lifting: 220ms strong ease out.
 const LEAVE = { opacity: 0, transform: "translateY(-12px)" };
@@ -43,6 +62,9 @@ export function GreenlightApp() {
   const [text, setText] = useState("");
   const [checked, setChecked] = useState<{ url: string; state: AccessState } | null>(null);
   const [mode, setMode] = useState<Mode>("ship");
+  const [agent, setAgent] = useState<ChatRole>("fixer");
+  const [agents, setAgents] = useState<AgentInfo[] | null>(null);
+  const [reportRunId, setReportRunId] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -64,10 +86,13 @@ export function GreenlightApp() {
 
   const found = findRepoUrl(text);
   const repoUrl = found?.url ?? null;
+  const target = agent === "scout" ? scoutTarget(text) : null;
+  const policyRepo = agent === "policy" ? (found?.repo ?? null) : null;
+  const policy = usePolicy(policyRepo, POLICY_MAX_AGE_MS);
 
-  // Access check: debounced while typing, aborted when the link changes again.
+  // Access check for Fix: debounced while typing, aborted when the link changes again.
   useEffect(() => {
-    if (!repoUrl) return;
+    if (!repoUrl || agent !== "fixer") return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       fetchAccess(repoUrl, controller.signal)
@@ -84,13 +109,19 @@ export function GreenlightApp() {
       clearTimeout(timer);
       controller.abort();
     };
-  }, [repoUrl]);
+  }, [repoUrl, agent]);
 
   const access: AccessState = !found
     ? { status: "idle" }
     : checked?.url === repoUrl
       ? checked.state
       : { status: "checking", repo: found.repo };
+
+  useEffect(() => {
+    fetchAgents()
+      .then(setAgents)
+      .catch(() => setAgents([]));
+  }, []);
 
   const refreshRuns = useCallback(() => {
     fetchRuns()
@@ -117,9 +148,11 @@ export function GreenlightApp() {
     async (runId: string, isReplay: boolean) => {
       try {
         const r = await fetchRun(runId);
-        const info = await fetchAccess(`https://github.com/${r.repo}`).catch(() => null);
+        // Only fix runs have a repo to check access for; a scout run's repo is its target.
+        const info = r.role === "scout" ? null : await fetchAccess(`https://github.com/${r.repo}`).catch(() => null);
         const meta: RunMeta = {
           id: r.id,
+          role: r.role ?? "fixer",
           repo: r.repo,
           mode: r.mode,
           viaFork: r.via_fork,
@@ -157,26 +190,68 @@ export function GreenlightApp() {
   }, [restore]);
 
   const launch = useCallback(
-    async (url: string, runMode: Mode) => {
+    async (request: StartRequest) => {
       setSendError(null);
-      const { runId, access: info } = await startRun(url, runMode);
+      const { runId, role, access: info } = await startAgentRun(request);
       setReplay(false);
       setUrl({ run: runId });
       follow.current = true;
-      open({ id: runId, repo: info.repo, mode: runMode, viaFork: info.viaFork, private: info.private, defaultBranch: info.defaultBranch });
+      const repo = info?.repo ?? (request.role === "scout" ? scoutKey(request.target) : (findRepoUrl(request.repo)?.repo ?? request.repo));
+      open({
+        id: runId,
+        role,
+        repo,
+        mode: request.role === "fixer" ? request.mode : "pr_only",
+        viaFork: info?.viaFork ?? false,
+        private: info?.private ?? null,
+        defaultBranch: info?.defaultBranch ?? null,
+      });
       refreshRuns();
     },
     [open, refreshRuns],
   );
 
   const ready = access.status === "ready" ? access.access : null;
-  const canSend = Boolean(repoUrl && ready && ready.modeOptions.includes(mode) && !sending);
+  const policyReady = policy?.status === "ready" ? policy.info : null;
+  const canSend =
+    !sending &&
+    (agent === "fixer"
+      ? Boolean(repoUrl && ready && ready.modeOptions.includes(mode))
+      : agent === "scout"
+        ? target !== null
+        : Boolean(repoUrl && policyReady && !policyReady.exists));
+
+  const request = (): StartRequest | null => {
+    if (agent === "scout") return target ? { role: "scout", target } : null;
+    if (!repoUrl) return null;
+    return agent === "policy" ? { role: "policy", repo: repoUrl } : { role: "fixer", repo: repoUrl, mode };
+  };
+
+  const note: ComposerNote | null =
+    agent === "scout"
+      ? text.trim() === ""
+        ? null
+        : target
+          ? { tone: "ok", text: OWNER_TARGET.test(target) ? `Scout every repo of ${target.replace(":", " ")}` : `Scout ${target.split(",").length} ${target.includes(",") ? "repos" : "repo"}` }
+          : { tone: "muted", text: "Try org:name, user:name, or GitHub repo links" }
+      : agent === "policy"
+        ? !found
+          ? text.trim() === "" ? null : { tone: "muted", text: "Paste a GitHub repo link to draft its policy" }
+          : !policy || policy.status === "loading"
+            ? { tone: "muted", text: `Checking ${found.repo} for .greenlight.yml` }
+            : policy.status === "failed"
+              ? { tone: "error", text: policy.message }
+              : policy.info.exists
+                ? { tone: "error", text: `${found.repo} already has ${policy.info.path}` }
+                : { tone: "ok", text: `No ${policy.info.path} in ${found.repo} yet. The policy agent drafts one` }
+        : null;
 
   const send = async () => {
-    if (!canSend || !repoUrl) return;
+    const next = request();
+    if (!canSend || !next) return;
     setSending(true);
     try {
-      await launch(repoUrl, mode);
+      await launch(next);
       setText("");
     } catch (e) {
       setSendError(e instanceof ApiError ? e.message : "Could not start the run");
@@ -185,11 +260,30 @@ export function GreenlightApp() {
     }
   };
 
+  /** "Fix this repo" on the scout's board: the same access check as the composer, then a Fix run. */
+  const fixRepo = async (repo: string) => {
+    const url = `https://github.com/${repo}`;
+    try {
+      const info = await fetchAccess(url);
+      const fixMode: Mode = info.modeOptions.includes(mode) ? mode : (info.modeOptions[0] ?? "pr_only");
+      setAgent("fixer");
+      await launch({ role: "fixer", repo: url, mode: fixMode });
+    } catch (e) {
+      setSendError(e instanceof ApiError ? e.message : `Could not start a Fix run on ${repo}`);
+    }
+  };
+
   const retry = async () => {
     if (!run) return;
     setRetrying(true);
     try {
-      await launch(`https://github.com/${run.repo}`, run.mode);
+      await launch(
+        run.role === "scout"
+          ? { role: "scout", target: run.repo.replace(/^repos:/, "") }
+          : run.role === "policy"
+            ? { role: "policy", repo: `https://github.com/${run.repo}` }
+            : { role: "fixer", repo: `https://github.com/${run.repo}`, mode: run.mode },
+      );
     } catch (e) {
       setSendError(e instanceof ApiError ? e.message : "Could not start the run");
     } finally {
@@ -231,9 +325,10 @@ export function GreenlightApp() {
     requestAnimationFrame(() => composerRef.current?.focus());
   };
 
-  const pickSuggestion = (suggested: Mode | null) => {
-    if (suggested) setMode(suggested);
-    setText(DEMO_REPO || "https://github.com/");
+  const pickSuggestion = (suggested: ChatRole) => {
+    setAgent(suggested);
+    setSendError(null);
+    setText(suggested === "scout" ? `user:${DEMO_OWNER}` : DEMO_REPO || "https://github.com/");
     requestAnimationFrame(() => {
       const el = composerRef.current;
       if (!el) return;
@@ -307,13 +402,34 @@ export function GreenlightApp() {
                   }}
                   className="min-h-0 flex-1 overflow-y-auto"
                 >
-                  <Conversation run={run} flare={flare} retrying={retrying} resuming={resuming} controlError={controlError} onDecide={onDecide} onRetry={retry} onResume={onResume} />
+                  <Conversation
+                    run={run}
+                    flare={flare}
+                    retrying={retrying}
+                    resuming={resuming}
+                    controlError={controlError}
+                    onDecide={onDecide}
+                    onRetry={retry}
+                    onResume={onResume}
+                    onAuditReport={(auditorRunId) => {
+                      setReportRunId(auditorRunId);
+                      setLedgerRunId(run.id);
+                    }}
+                    onFixRepo={fixRepo}
+                  />
                 </div>
               )}
 
               <motion.div layout="position" transition={GLIDE} className={clsx("mx-auto w-full max-w-3xl px-5", showEmpty ? "mt-10" : "pb-5 pt-2")}>
                 <Composer
                   ref={composerRef}
+                  agent={agent}
+                  onAgentChange={(next) => {
+                    setAgent(next);
+                    setSendError(null);
+                  }}
+                  agents={agents}
+                  note={note}
                   text={text}
                   onTextChange={(t) => {
                     setText(t);
@@ -356,8 +472,26 @@ export function GreenlightApp() {
         </div>
       </div>
 
-      <PolicySheet open={policyOpen} onOpenChange={setPolicyOpen} run={run} />
-      <LedgerDrawer runId={ledgerRunId} open={ledgerRunId !== null} onOpenChange={(o) => !o && setLedgerRunId(null)} />
+      <PolicySheet
+        open={policyOpen}
+        onOpenChange={setPolicyOpen}
+        run={run}
+        onOpenRun={(id) => {
+          setPolicyOpen(false);
+          refreshRuns();
+          restore(id, false);
+        }}
+      />
+      <LedgerDrawer
+        runId={ledgerRunId}
+        reportRunId={reportRunId}
+        open={ledgerRunId !== null}
+        onOpenChange={(o) => {
+          if (o) return;
+          setLedgerRunId(null);
+          setReportRunId(null);
+        }}
+      />
     </Tooltip.Provider>
   );
 }

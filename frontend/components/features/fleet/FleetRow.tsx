@@ -83,7 +83,8 @@ function Detail({ row }: { row: RepoResult }) {
   );
 }
 
-export function FleetRow({ row }: { row: RepoResult }) {
+/** onFix starts a Fix run in place (the chat); without it the row links to the launch view with ?repo=. */
+export function FleetRow({ row, onFix }: { row: RepoResult; onFix?: (repo: string) => void }) {
   const reduce = useReducedMotion();
   const [open, setOpen] = useState(false);
   const canOpen = row.top.length > 0;
@@ -117,7 +118,17 @@ export function FleetRow({ row }: { row: RepoResult }) {
 
         <div className="flex flex-wrap items-center gap-2 md:justify-end">
           <SeverityChips counts={row.counts} />
-          {hot && (
+          {hot && onFix && (
+            <button
+              type="button"
+              onClick={() => onFix(row.repo)}
+              className="inline-flex h-8 items-center gap-1.5 rounded-full border border-accent/45 bg-accent/[0.07] px-3 text-[0.82rem] font-medium text-accent transition-[background-color,transform] duration-150 ease-out hover:bg-accent/15 active:scale-[0.97]"
+            >
+              <Wrench weight="bold" className="size-3.5" aria-hidden />
+              Fix this repo
+            </button>
+          )}
+          {hot && !onFix && (
             <Link
               href={`/?repo=${encodeURIComponent(`https://github.com/${row.repo}`)}`}
               className="inline-flex h-8 items-center gap-1.5 rounded-full border border-accent/45 bg-accent/[0.07] px-3 text-[0.82rem] font-medium text-accent transition-[background-color,transform] duration-150 ease-out hover:bg-accent/15 active:scale-[0.97]"
