@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         ledger = Ledger(settings.ledger_path)
         await ledger.init()
-        await facts.init(ledger.db)
+        await facts.init(ledger.db, ledger.write_lock)
         app.state.ledger = ledger
         app.state.run_manager = RunManager(ledger, app.state.trueforge_client)
 

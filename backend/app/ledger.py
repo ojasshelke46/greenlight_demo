@@ -155,6 +155,11 @@ class Ledger:
         # the same idx or prev_hash.
         self._chain_locks: dict[str, asyncio.Lock] = {}
 
+    @property
+    def write_lock(self) -> asyncio.Lock:
+        """Hold while writing and committing on the shared connection outside the ledger's own methods."""
+        return self._tx_lock
+
     def _chain_lock(self, run_id: str) -> asyncio.Lock:
         return self._chain_locks.setdefault(run_id, asyncio.Lock())
 

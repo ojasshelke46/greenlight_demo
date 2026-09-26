@@ -34,6 +34,7 @@ CREATE INDEX IF NOT EXISTS idx_run_facts_run_kind ON run_facts(run_id, kind);
 _db: aiosqlite.Connection | None = None
 _queue: asyncio.Queue[tuple[str, list[dict[str, Any]]] | None] | None = None
 _writer: asyncio.Task[None] | None = None
+_write_lock: asyncio.Lock = asyncio.Lock()
 
 
 def _conn() -> aiosqlite.Connection:
@@ -42,10 +43,13 @@ def _conn() -> aiosqlite.Connection:
     return _db
 
 
-async def init(ledger_db: aiosqlite.Connection) -> None:
-    """ledger_db is Ledger.db. The ledger owns and closes it; close() here only stops the writer."""
-    global _db, _queue, _writer
+async def init(ledger_db: aiosqlite.Connection, write_lock: asyncio.Lock | None = None) -> None:
+    """ledger_db is Ledger.db and write_lock is Ledger.write_lock. The ledger owns and closes the connection;
+    close() here only stops the writer. Holding the ledger's write lock around each commit keeps it from
+    committing half of a ledger transaction (a row without its chain entry)."""
+    global _db, _queue, _writer, _write_lock
     _db = ledger_db
+    _write_lock = write_lock or asyncio.Lock()
     await _db.executescript(_SCHEMA)
     await _db.commit()
     _queue = asyncio.Queue()
@@ -62,8 +66,9 @@ async def close() -> None:
 
 async def add_fact(run_id: str, fact: dict[str, Any]) -> None:
     db = _conn()
-    await _insert(db, run_id, fact)
-    await db.commit()
+    async with _write_lock:
+        await _insert(db, run_id, fact)
+        await db.commit()
 
 
 async def get_facts(run_id: str, kind: str | None = None) -> list[dict[str, Any]]:
@@ -107,9 +112,10 @@ async def _write_loop(queue: asyncio.Queue[tuple[str, list[dict[str, Any]]] | No
                 return
             run_id, facts = item
             try:
-                for fact in facts:
-                    await _insert(_conn(), run_id, fact)
-                await _conn().commit()
+                async with _write_lock:
+                    for fact in facts:
+                        await _insert(_conn(), run_id, fact)
+                    await _conn().commit()
             except Exception:
                 # No rollback: on the shared connection it would also discard the ledger's pending writes.
                 token = run_id_var.set(run_id)
