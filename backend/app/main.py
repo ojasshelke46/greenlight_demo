@@ -7,6 +7,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app import facts
+from app import features  # noqa: F401  Runs each feature's __init__ so its hooks are registered.
 from app.config import get_settings
 from app.github import GitHubClient
 from app.ledger import Ledger
@@ -30,6 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
         ledger = Ledger(settings.ledger_path)
         await ledger.init()
+        await facts.init(ledger.db)
         app.state.ledger = ledger
         app.state.run_manager = RunManager(ledger, app.state.trueforge_client)
 
@@ -37,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
         finally:
             await app.state.run_manager.close()
+            await facts.close()
             await ledger.close()
 
 

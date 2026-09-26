@@ -4,8 +4,10 @@ import logging
 from collections.abc import AsyncIterator
 from typing import Any, Protocol
 
+from app import facts
 from app.ledger import Ledger, utc_now
 from app.log import run_id_var
+from app.markers import FactStream
 from app.tools import merge_tool_call_deltas, resolve_tool_call
 from app.trueforge import TurnEvent, TurnHandle, TurnStreamGone
 
@@ -124,6 +126,7 @@ class RunManager:
 
     async def _pump(self, run_id: str, session_id: str, turn_id: str, live: LiveRun, base: int) -> None:
         run_id_var.set(run_id)
+        fact_stream = FactStream()
         # Tool calls per model.message id; the live stream sends them as delta fragments.
         messages: dict[str, list[dict[str, Any]]] = {}
         pending = False
@@ -150,6 +153,9 @@ class RunManager:
                         data = json.dumps(event)
                         live.publish(sequence, data)
                         self._ledger.append_event(run_id, sequence, event_type, data, received_at)
+
+                        # After publish, and only queued, so facts never delay the stream.
+                        facts.record(run_id, fact_stream.feed(event))
 
                         if event_type == "model.message":
                             calls = messages.setdefault(event["id"], [])

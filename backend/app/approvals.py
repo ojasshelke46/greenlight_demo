@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 
 from app.github import GitHubClient
+from app.hooks import ApprovalContext, PendingActionInfo, PriorApproval, RunInfo
 from app.ledger import Ledger
 from app.tools import ResolvedToolCall, resolve_tool_call
 from app.trueforge import PendingAction, TrueForgeClient, TrueForgeError
@@ -14,10 +15,44 @@ MERGE_TOOL = "merge_pull_request"
 HEAD_REF_PREFIX = "greenlight/"
 
 
+NEEDS_MORE_PREFIX = "needs_more: "
+
+
 class ApprovalRefused(Exception):
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
         self.reason = reason
+
+
+async def approvals_for_run(ledger: Ledger, run_id: str) -> list[PriorApproval]:
+    """Every recorded approval attempt for the run, oldest first."""
+    cursor = await ledger.db.execute(
+        "SELECT approver, decision, decided_at, result FROM approvals WHERE run_id = ? ORDER BY id", (run_id,)
+    )
+    return [
+        PriorApproval(approver=row["approver"], decision=row["decision"], decided_at=row["decided_at"], result=row["result"])
+        for row in await cursor.fetchall()
+    ]
+
+
+def approver_decision(prior: list[PriorApproval], approver: str) -> PriorApproval | None:
+    """The approver's standing decision on this run: accepted wins over needs more. Refusals never stand."""
+    mine = [p for p in prior if p.approver == approver]
+    accepted = [p for p in mine if p.result == "accepted"]
+    if accepted:
+        return accepted[0]
+    waiting = [p for p in mine if p.result.startswith(NEEDS_MORE_PREFIX)]
+    return waiting[-1] if waiting else None
+
+
+def approval_context(run: dict[str, Any], tool: ResolvedToolCall, approver: str, prior: list[PriorApproval]) -> ApprovalContext:
+    owner, repo = run["repo"].split("/", 1)
+    return ApprovalContext(
+        run=RunInfo(id=run["id"], owner=owner, repo=repo, mode=run["mode"], via_fork=run["via_fork"]),
+        pending_action=PendingActionInfo(tool_name=tool.name or "unknown", arguments=tool.arguments),
+        approver=approver,
+        prior_approvals=prior,
+    )
 
 
 async def load_pending(

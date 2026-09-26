@@ -1,15 +1,26 @@
 import time
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field
 from sse_starlette import EventSourceResponse
 
-from app.approvals import MERGE_TOOL, ApprovalRefused, check_merge, load_pending
+from app.approvals import (
+    MERGE_TOOL,
+    NEEDS_MORE_PREFIX,
+    ApprovalRefused,
+    approval_context,
+    approvals_for_run,
+    approver_decision,
+    check_merge,
+    load_pending,
+)
 from app.auth import require_api_key
+from app.hooks import Deny, NeedMore, build_run_message_extras, run_approval_checks
 from app.ledger import Ledger
 from app.log import run_id_var
 from app.routes.access import AccessResponse, resolve_access
@@ -57,6 +68,8 @@ class ApprovalResponse(BaseModel):
     status: str
     # True when this call returned an earlier decision instead of making a new one.
     replayed: bool
+    # Set on 202: why the approval is recorded but the agent has not resumed yet.
+    reason: str | None = None
 
 
 class RunControlResponse(BaseModel):
@@ -94,10 +107,16 @@ async def create_run(body: CreateRunRequest, request: Request) -> CreateRunRespo
             detail=f"Mode ship needs push access to {access.repo}. Use pr_only instead.",
         )
 
+    owner, name = access.repo.split("/", 1)
+    message = build_prompt(access.repo, body.mode)
+    extras = await build_run_message_extras(owner, name)
+    if extras:
+        message = f"{message}\n\n{extras}"
+
     trueforge = state.trueforge_client
     try:
         session_id = await trueforge.create_session(await trueforge.get_agent_id())
-        turn = await trueforge.start_turn(session_id, build_prompt(access.repo, body.mode))
+        turn = await trueforge.start_turn(session_id, message)
     except (TrueForgeError, httpx.HTTPError) as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Could not start the TrueForge agent: {exc}") from exc
     turn_id = turn.turn_id
@@ -174,28 +193,55 @@ async def stream_events(
     )
 
 
-@router.post("/runs/{run_id}/approval", response_model=ApprovalResponse)
-async def decide_approval(run_id: str, body: ApprovalRequest, request: Request) -> ApprovalResponse:
+@router.post(
+    "/runs/{run_id}/approval",
+    response_model=ApprovalResponse,
+    responses={202: {"model": ApprovalResponse, "description": "Recorded, but more is needed before the agent resumes"}},
+)
+async def decide_approval(run_id: str, body: ApprovalRequest, request: Request, response: Response) -> ApprovalResponse:
     state = request.app.state
     ledger: Ledger = state.ledger
     manager: RunManager = state.run_manager
 
     async with manager.approval_lock(run_id):
         await _get_run(ledger, run_id)
-        prior = await ledger.accepted_approval(run_id)
-        if prior is not None:
-            run = await _get_run(ledger, run_id)
-            return ApprovalResponse(run_id=run_id, status=run["status"], replayed=True, **_decision(prior))
-
         # Let queued stream writes (pending action, turn.done) land before reading the run.
         await ledger.flush()
         run = await _get_run(ledger, run_id)
+
+        # Idempotent per (run, approver): a repeat call returns that approver's standing decision.
+        prior = await approvals_for_run(ledger, run_id)
+        standing = approver_decision(prior, body.approver)
+        if standing is not None and standing.result == "accepted":
+            return ApprovalResponse(run_id=run_id, status=run["status"], replayed=True, **_decision(asdict(standing)))
+        if standing is not None and run["status"] == "awaiting_approval":
+            response.status_code = status.HTTP_202_ACCEPTED
+            reason = standing.result.removeprefix(NEEDS_MORE_PREFIX)
+            return ApprovalResponse(run_id=run_id, status=run["status"], replayed=True, reason=reason, **_decision(asdict(standing)))
+
         tool_name, arguments = "unknown", None
         try:
             action, tool = await load_pending(run, ledger, state.trueforge_client)
             tool_name, arguments = tool.name or "unknown", tool.arguments
+            # Feature checks only gate approvals; a reject is always allowed through.
             if body.decision == "approve":
                 await check_merge(run, tool, state.github_client)
+                verdict = await run_approval_checks(approval_context(run, tool, body.approver, prior))
+                if isinstance(verdict, Deny):
+                    raise ApprovalRefused(verdict.reason)
+                if isinstance(verdict, NeedMore):
+                    waiting = await ledger.record_approval(
+                        run_id=run_id,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        decision=body.decision,
+                        approver=body.approver,
+                        result=f"{NEEDS_MORE_PREFIX}{verdict.reason}",
+                    )
+                    response.status_code = status.HTTP_202_ACCEPTED
+                    return ApprovalResponse(
+                        run_id=run_id, status=run["status"], replayed=False, reason=verdict.reason, **_decision(waiting)
+                    )
         except ApprovalRefused as exc:
             await ledger.record_approval(
                 run_id=run_id,
