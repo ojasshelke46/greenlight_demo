@@ -1,10 +1,11 @@
 "use client";
 
-import { ArrowsLeftRight, CircleNotch, Cpu, GitFork, Globe, Handshake, LockSimple, PaperPlaneRight, Paperclip, Pause, Warning } from "@phosphor-icons/react";
+import { ArrowsLeftRight, CircleNotch, Cpu, GitFork, Globe, Handshake, LockSimple, Paperclip, Pause, Warning } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { forwardRef, type KeyboardEvent } from "react";
 import { Tip } from "@/components/Tip";
+import AnimatedGenerateButton from "@/components/ui/animated-generate-button-shadcn-tailwind";
 import { MODE_LABEL, type AccessState, type Mode } from "@/lib/state";
 
 type Props = {
@@ -142,22 +143,14 @@ export const Composer = forwardRef<HTMLTextAreaElement, Props>(function Composer
               </button>
             </Tip>
           ) : (
-            <button
-              type="button"
-              onClick={onSend}
+            <AnimatedGenerateButton
+              labelIdle="Send"
+              labelActive="Starting"
+              generating={sending}
               disabled={!canSend}
-              aria-label={sending ? "Starting the run" : "Start the run"}
-              className={clsx(
-                "grid size-11 place-items-center rounded-full transition-[transform,background-color,box-shadow] duration-150 ease-out active:scale-[0.96]",
-                canSend ? "send-glow bg-accent text-canvas hover:brightness-110" : "cursor-not-allowed bg-raised text-fg-subtle",
-              )}
-            >
-              {sending ? (
-                <CircleNotch weight="bold" className="size-5 animate-spin motion-reduce:animate-none" aria-hidden />
-              ) : (
-                <PaperPlaneRight weight="fill" className="size-5" aria-hidden />
-              )}
-            </button>
+              onClick={onSend}
+              ariaLabel={sending ? "Starting the run" : "Start the run"}
+            />
           )}
         </div>
       </div>

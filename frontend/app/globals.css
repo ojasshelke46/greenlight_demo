@@ -115,79 +115,46 @@ input {
 }
 
 /*
-  The orb. Layered radial gradients for the sphere, two conic layers for the internal swirl, and a
-  bloom shadow. Swirl is constant motion, so it is linear; breathing moves on screen, so it uses the
-  strong ease in out. Both are CSS animations so they stay smooth while the page streams events.
+  The orb shell around the Siri orb (components/ui/siri-orb.tsx). The orb swirls on its own; the
+  shell adds a pulse while the agent works (state indication, strong ease in out, 1.6s loop), one
+  flare on approval (rare, strong ease out, 700ms), and a soft bloom behind the hero orb.
 */
-.orb {
-  --orb: var(--accent);
-  position: relative;
+.orb-shell {
   border-radius: 999px;
-  isolation: isolate;
-  background:
-    radial-gradient(circle at 34% 28%, rgb(255 255 255 / 0.95) 0 3%, rgb(255 255 255 / 0.25) 9%, transparent 22%),
-    radial-gradient(circle at 50% 58%, color-mix(in oklab, var(--orb) 92%, white) 0%, var(--orb) 22%, color-mix(in oklab, var(--orb) 45%, #050505) 55%, #070707 78%);
-  box-shadow:
-    0 0 0 1px color-mix(in oklab, var(--orb) 45%, transparent),
-    0 0 40px 6px color-mix(in oklab, var(--orb) 32%, transparent),
-    0 0 120px 30px color-mix(in oklab, var(--orb) 14%, transparent),
-    inset 0 -10px 30px color-mix(in oklab, var(--orb) 35%, transparent);
-  animation: orb-breathe 6s var(--ease-in-out) infinite;
 }
-
-.orb::before,
-.orb::after {
+/* Glass rim and highlight over the orb: light only, no dark edge. */
+.orb-shell::after {
   content: "";
   position: absolute;
-  inset: 8%;
+  inset: 0;
   border-radius: inherit;
-  mix-blend-mode: screen;
   pointer-events: none;
+  background: radial-gradient(circle at 32% 26%, rgb(255 255 255 / 0.55) 0 8%, rgb(255 255 255 / 0.12) 22%, transparent 45%);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.35),
+    inset 0 -6px 18px rgb(255 255 255 / 0.18);
 }
-
-.orb::before {
-  background: conic-gradient(from 0deg, transparent 0 12%, color-mix(in oklab, var(--orb) 85%, white) 22%, transparent 34% 52%, color-mix(in oklab, var(--orb) 70%, white) 64%, transparent 78%);
-  filter: blur(6px);
-  opacity: 0.75;
-  animation: orb-swirl 14s linear infinite;
+.orb-shell[data-bloom="true"] {
+  box-shadow:
+    0 0 60px 8px color-mix(in oklab, var(--accent) 22%, transparent),
+    0 0 140px 40px color-mix(in oklab, var(--accent) 9%, transparent);
 }
-
-.orb::after {
-  inset: 18%;
-  background: conic-gradient(from 180deg, transparent 0 20%, rgb(255 255 255 / 0.55) 30%, transparent 42% 70%, rgb(255 255 255 / 0.35) 80%, transparent 90%);
-  filter: blur(4px);
-  opacity: 0.55;
-  animation: orb-swirl 9s linear infinite reverse;
+.orb-shell[data-working="true"] {
+  animation: orb-pulse 1.6s var(--ease-in-out) infinite;
 }
-
-.orb[data-working="true"] {
-  animation-duration: 1.6s;
-}
-.orb[data-working="true"]::before {
-  animation-duration: 4s;
-}
-.orb[data-working="true"]::after {
-  animation-duration: 3s;
-}
-
-/* One flare on approval: rare, so it may be expressive. Strong ease out, 700ms. */
-.orb[data-flare="true"] {
+.orb-shell[data-flare="true"] {
   animation: orb-flare 700ms var(--ease-out) 1;
 }
 
-@keyframes orb-breathe {
+@keyframes orb-pulse {
   0%,
   100% {
     transform: scale(1);
+    filter: brightness(1);
   }
   50% {
-    transform: scale(1.04);
-  }
-}
-
-@keyframes orb-swirl {
-  to {
-    transform: rotate(360deg);
+    transform: scale(1.08);
+    filter: brightness(1.25);
   }
 }
 
@@ -204,15 +171,6 @@ input {
     transform: scale(1);
     filter: brightness(1);
   }
-}
-
-/* Thin halo ring around the hero orb. */
-.orb-halo {
-  border-radius: 999px;
-  border: 1px solid color-mix(in oklab, var(--accent) 35%, transparent);
-  box-shadow:
-    inset 0 0 24px color-mix(in oklab, var(--accent) 18%, transparent),
-    0 0 30px color-mix(in oklab, var(--accent) 10%, transparent);
 }
 
 /* Composer focus: an inner accent glow. Hover and focus are frequent, so 200ms ease. */
@@ -286,13 +244,11 @@ input {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .orb,
-  .orb::before,
-  .orb::after,
+  .orb-shell[data-working="true"],
   .dot-pulse {
     animation: none;
   }
-  .orb[data-flare="true"] {
+  .orb-shell[data-flare="true"] {
     animation: orb-flare-reduced 400ms ease 1;
   }
   [data-holding="true"] {

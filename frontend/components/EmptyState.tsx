@@ -7,7 +7,7 @@ import { Orb } from "./Orb";
 export function Hero({ userName }: { userName: string }) {
   return (
     <div className="flex flex-col items-center px-5 text-center">
-      <Orb size={140} layoutId="orb" halo />
+      <Orb size={176} layoutId="orb" bloom />
       <h1 className="text-gradient mt-9 pb-1 font-display text-[2rem] font-semibold sm:text-[2.6rem] leading-[1.1] tracking-[-0.03em] md:text-[3.25rem]">
         Welcome back, {userName}
       </h1>

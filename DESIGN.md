@@ -99,7 +99,7 @@ Rejected: traffic lights, lamps, and any signal metaphor. Dashboard grids of equ
 - One accent, defined once as `--accent` in `frontend/app/globals.css`; swapping that line recolours the product.
 - Status colours appear only inside agent output.
 - Monospace only for what the agent executes or produces.
-- The orb is the agent: 140px in the empty state, 28px as its avatar in the chat.
+- The orb is the agent: 176px in the empty state, 28px as its avatar in the chat.
 
 ## Colors
 
@@ -130,7 +130,7 @@ Large and soft: cards 16px, panels 24px, composer 28px, pills 999px for chips, b
 
 ## Components
 
-- **Orb**: layered radial gradients plus two counter rotating conic swirls and a bloom. Idle: 6s breathe, 14s swirl. Working: 1.6s breathe, 4s swirl. One 700ms flare when an approval completes. Static under reduced motion.
+- **Orb**: the Siri orb (`frontend/components/ui/siri-orb.tsx`, conic gradients rotated through an animated `--angle`), wrapped by `components/Orb.tsx`. Light and glassy only: a pale translucent base with translucent lime (from the accent), mint and cream swirls, a thin white rim and a soft specular highlight. No dark or black tones. 176px with an accent bloom in the empty state, 28px as the agent avatar. Idle swirl 20s, working 6s plus a 1.6s pulse, one 700ms flare when an approval completes. The swirl stops under reduced motion.
 - **Composer**: black card, 28px radius, inner accent glow on focus. Access and visibility chips resolve above the textarea after the debounced access check. Mode chip toggles Ship it and PR only; Ship it is disabled with a tooltip reason without push access. Round accent send button. Enter sends, Shift+Enter adds a line.
 - **Agent message**: orb avatar, status line, a collapsible step rail (dots: amber active, accent done, red failed, with elapsed time), then blocks in event order: text, terminal, action rows, vulnerability cards, syntax highlighted diff, PR card.
 - **Approval card**: appears only for merge_pull_request on a ship run with a collaborator bot. The rest of the chat dims to 35%. Hold to approve for 2 seconds; the accent fill sweeps linearly and rewinds over 350ms on early release. Reject is a quiet text button. Backend refusals show inside the card in red.
