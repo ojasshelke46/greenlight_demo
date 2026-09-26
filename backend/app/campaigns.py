@@ -123,7 +123,11 @@ def fix_message(repo: str, mode: str, item: dict[str, Any], branch: str, sandbox
     return (
         f"TASK: fix {item['package']}\nRepository: https://github.com/{repo}\nMODE: {mode}\nBRANCH: {branch}\n"
         f"Advisories: {advisories}\nUpgrade {versions}.\n\n"
-        f"Fix only {item['package']}. Leave every other package exactly as it is.\n\n{sandbox_note}\n\n{keep_going}"
+        f"Fix only {item['package']}. Leave every other package exactly as it is.\n"
+        "The advisories above come from this campaign's scan: if OSV is unreachable from the sandbox, use them. "
+        "If the repo has no test script, check the change with the repo's lint and type check (for example "
+        "npm run lint and npx tsc --noEmit) instead: never run a production build, it does not finish in the sandbox.\n\n"
+        f"{sandbox_note}\n\n{keep_going}"
     )
 
 
