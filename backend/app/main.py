@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from app import facts, orchestrator
 from app import features  # noqa: F401  Runs each feature's __init__ so its hooks are registered.
 from app.agents import AgentRegistry
+from app.campaigns import Campaigns
 from app.config import get_settings
 from app.github import GitHubClient
 from app.ledger import Ledger
@@ -17,6 +18,7 @@ from app.log import configure_logging
 from app.middleware import RequestContextMiddleware
 from app.routes import api_router
 from app.routes.audit import router as audit_router
+from app.routes.campaigns import router as campaigns_router
 from app.routes.receipt import router as receipt_router
 from app.runs import RunManager
 from app.trueforge import TrueForgeClient
@@ -44,6 +46,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.orchestrator = orchestrator.Orchestrator(app, app.state.agents)
         orchestrator.bind(app.state.orchestrator)
         app.state.run_manager = RunManager(ledger, app.state.trueforge_client, observer=app.state.orchestrator)
+        app.state.campaigns = Campaigns(app)
+        await app.state.campaigns.init()
+        app.state.orchestrator.campaigns = app.state.campaigns
         # Runs that were active when the backend stopped carry on now, whether or not a browser is watching.
         await app.state.run_manager.resume_active()
 
@@ -51,6 +56,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             yield
         finally:
             orchestrator.bind(None)
+            await app.state.campaigns.close()
             await app.state.orchestrator.close()
             await app.state.run_manager.close()
             await facts.close()
@@ -84,6 +90,7 @@ def create_app() -> FastAPI:
     app.include_router(api_router)
     app.include_router(receipt_router)
     app.include_router(audit_router)
+    app.include_router(campaigns_router)
 
     return app
 

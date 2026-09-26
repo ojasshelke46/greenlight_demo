@@ -84,11 +84,11 @@ function Detail({ row }: { row: RepoResult }) {
 }
 
 /** onFix starts a Fix run in place (the chat); without it the row links to the launch view with ?repo=. */
-export function FleetRow({ row, onFix }: { row: RepoResult; onFix?: (repo: string) => void }) {
+export function FleetRow({ row, onFix, fixable = true }: { row: RepoResult; onFix?: (repo: string) => void; fixable?: boolean }) {
   const reduce = useReducedMotion();
   const [open, setOpen] = useState(false);
   const canOpen = row.top.length > 0;
-  const hot = exposed(row);
+  const hot = exposed(row) && fixable;
 
   return (
     <motion.li

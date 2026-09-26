@@ -170,6 +170,10 @@ export type Release = {
 export type RunMeta = {
   id: string;
   role: Role;
+  // Campaign runs: "scan" is the campaign itself (its id is the campaign id), "fix" fixes one package.
+  task?: "scan" | "fix" | "policy" | null;
+  campaignId?: string | null;
+  package?: string | null;
   repo: string;
   mode: Mode;
   viaFork: boolean;
@@ -209,6 +213,8 @@ export type RunState = RunMeta & {
 
 export type RunSummary = {
   id: string;
+  // A run, or a fleet or policy campaign listed with the runs.
+  kind?: "run" | "fleet" | "policy";
   role: Role;
   repo: string;
   mode: Mode;

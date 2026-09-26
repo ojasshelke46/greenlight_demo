@@ -61,7 +61,19 @@ export async function startRun(repoUrl: string, mode: Mode): Promise<{ runId: st
   return { runId: started.runId, access: started.access };
 }
 
-export type BackendRun = { id: string; status: string; repo: string; mode: Mode; via_fork: boolean; role: Role; parent_run_id: string | null };
+export type BackendRun = {
+  id: string;
+  status: string;
+  repo: string;
+  mode: Mode;
+  via_fork: boolean;
+  role: Role;
+  parent_run_id: string | null;
+  task: "scan" | "fix" | "policy" | null;
+  campaign_id: string | null;
+  package: string | null;
+  pr_url: string | null;
+};
 
 export async function fetchRun(runId: string): Promise<BackendRun> {
   return json<BackendRun>(await fetch(`/api/run?runId=${encodeURIComponent(runId)}`));

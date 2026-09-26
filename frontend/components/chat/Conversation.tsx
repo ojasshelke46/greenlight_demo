@@ -4,6 +4,7 @@ import { ArrowClockwise, ArrowsClockwise, Binoculars, GithubLogo, ListChecks } f
 import clsx from "clsx";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Fragment, useState, type ReactNode } from "react";
+import { CampaignPanel } from "@/components/campaign/CampaignPanel";
 import { ProofPanel } from "@/components/features/proof/ProofPanel";
 import { Orb } from "@/components/Orb";
 import { AuditSlot } from "@/components/run/AuditSlot";
@@ -35,6 +36,8 @@ type Props = {
   onAuditReport: (auditorRunId: string) => void;
   // Starts a Fix run on a repo from the scout's board, after the access check.
   onFixRepo: (repo: string) => void;
+  // Opens another run in the chat, e.g. a campaign's fix run waiting for a merge approval.
+  onOpenRun: (runId: string) => void;
   // Answers the agent's question in the same session (from an option on the question card).
   onAnswer: (answer: string) => void;
   answering: boolean;
@@ -92,7 +95,7 @@ function RequestBubble({ run }: { run: RunState }) {
   );
 }
 
-export function Conversation({ run, flare, retrying, resuming, controlError, onDecide, onRetry, onResume, onAuditReport, onFixRepo, onAnswer, answering }: Props) {
+export function Conversation({ run, flare, retrying, resuming, controlError, onDecide, onRetry, onResume, onAuditReport, onFixRepo, onOpenRun, onAnswer, answering }: Props) {
   const reduce = useReducedMotion();
   // Blocks that already existed on first render (a replayed run) appear without an entrance.
   const [initialIds] = useState(() => new Set(run.blocks.map((b) => b.id)));
@@ -167,6 +170,8 @@ export function Conversation({ run, flare, retrying, resuming, controlError, onD
             {run.blocks.length === 0 && run.status.working && <ThinkingPill />}
 
             {run.role === "scout" && <ScoutBoard runId={run.id} finished={run.finished} onFix={onFixRepo} />}
+
+            {run.task === "scan" && <CampaignPanel campaignId={run.campaignId ?? run.id} repo={run.repo} onOpenRun={onOpenRun} onAuditReport={onAuditReport} />}
 
             <ProofPanel variant="run" run={run} />
           </motion.div>
@@ -275,7 +280,8 @@ function Outcome({
 
   // Every other run that has ended (a helper agent's report, a fix that stopped short of a PR, a run that
   // failed) still has a receipt and a flight record, shown under its outcome card. Not while paused or asking.
-  const ended = run.finished && !run.paused && !run.question && !pending && !decided;
+  // A campaign's scan changes nothing; its receipts and flight records live on each fix run.
+  const ended = run.finished && !run.paused && !run.question && !pending && !decided && run.task !== "scan";
   if (ended && !(!canShip && run.pullRequest && !run.failure)) {
     out.push(
       card(
@@ -310,7 +316,7 @@ function UserBubble({ text, answer }: { text: string; answer: boolean }) {
   );
 }
 
-function BlockView({ block, live }: { block: Block; live: boolean }) {
+export function BlockView({ block, live }: { block: Block; live: boolean }) {
   switch (block.kind) {
     case "user":
       return <UserBubble text={block.text} answer={block.answer} />;

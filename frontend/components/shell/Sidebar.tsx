@@ -12,7 +12,7 @@ type Props = {
   runs: RunSummary[] | null;
   runsError: string | null;
   activeRunId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (run: RunSummary) => void;
   onNew: () => void;
   onCollapse: () => void;
   onOpenPolicy: () => void;
@@ -116,12 +116,12 @@ export function Sidebar({ className, runs, runsError, activeRunId, onSelect, onN
                 const active = run.id === activeRunId;
                 return (
                   <li key={run.id} className={clsx("group flex h-10 items-center rounded-full border pl-3.5 pr-1 transition-colors duration-150", active ? "border-accent/30 bg-card" : "border-transparent bg-card/50 hover:bg-card")}>
-                    <button type="button" onClick={() => onSelect(run.id)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-current={active ? "page" : undefined}>
+                    <button type="button" onClick={() => onSelect(run)} className="flex min-w-0 flex-1 items-center gap-2.5 text-left" aria-current={active ? "page" : undefined}>
                       <span className={clsx("size-2 shrink-0 rounded-full", dot.className)} role="img" aria-label={dot.label} />
                       <span className="min-w-0 flex-1 truncate font-mono text-[0.8rem] text-fg-muted group-hover:text-fg">{run.repo.replace(/^repos:/, "")}</span>
                       <span className="shrink-0 rounded-full border border-line px-1.5 py-px text-[0.72rem] font-medium text-fg-subtle">{ROLE_LABEL[run.role]}</span>
                     </button>
-                    <RunMenu runId={run.id} onOpen={() => onSelect(run.id)} onLedger={() => onOpenLedger(run.id)} />
+                    <RunMenu runId={run.id} onOpen={() => onSelect(run)} onLedger={() => onOpenLedger(run.id)} />
                   </li>
                 );
               })}

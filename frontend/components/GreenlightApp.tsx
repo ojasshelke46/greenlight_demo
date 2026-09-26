@@ -5,13 +5,16 @@ import { Notebook } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { FleetCampaignView } from "@/components/campaign/FleetCampaignView";
+import { PolicyCampaignView } from "@/components/campaign/PolicyCampaignView";
 import { Conversation } from "@/components/chat/Conversation";
 import { Composer, type ComposerNote } from "@/components/composer/Composer";
 import { Hero, Suggestions } from "@/components/EmptyState";
 import { LedgerDrawer, PolicySheet } from "@/components/shell/Sheets";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
-import { ApiError, fetchAccess, fetchAgents, fetchHealth, fetchRun, fetchRuns, startAgentRun, type StartRequest } from "@/lib/api";
+import { ApiError, fetchAccess, fetchAgents, fetchHealth, fetchRun, fetchRuns } from "@/lib/api";
+import { campaignApi, startCampaign } from "@/lib/campaigns";
 import { useApproval } from "@/lib/features/approval";
 import { usePolicy } from "@/lib/features/policy";
 import { findRepoUrl, type AccessState, type AgentInfo, type ChatRole, type Mode, type RunMeta, type RunSummary } from "@/lib/state";
@@ -21,11 +24,8 @@ const USER_NAME = process.env.NEXT_PUBLIC_USER_NAME || "there";
 const DEMO_REPO = process.env.NEXT_PUBLIC_DEMO_REPO || "";
 const DEMO_OWNER = findRepoUrl(DEMO_REPO)?.repo.split("/")[0] ?? "";
 
-/** The backend's key for a scout target: org:name and user:name as typed, repo links as repos:owner/name,… */
-function scoutKey(target: string): string {
-  if (OWNER_TARGET.test(target)) return target.toLowerCase();
-  return `repos:${target.split(",").map((url) => findRepoUrl(url)?.repo ?? url).join(",")}`;
-}
+type LaunchRequest = { role: "fixer"; repo: string; mode: Mode } | { role: "scout"; target: string } | { role: "policy"; repos: string[] };
+
 const ACCESS_DEBOUNCE_MS = 350;
 const POLICY_MAX_AGE_MS = 15_000;
 const OWNER_TARGET = /^(org|user):([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))$/i;
@@ -65,6 +65,8 @@ export function GreenlightApp() {
   const [agent, setAgent] = useState<ChatRole>("fixer");
   const [agents, setAgents] = useState<AgentInfo[] | null>(null);
   const [reportRunId, setReportRunId] = useState<string | null>(null);
+  // A fleet (scout) or policy campaign shown instead of a run.
+  const [view, setView] = useState<{ kind: "fleet" | "policy"; id: string } | null>(null);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
@@ -88,6 +90,7 @@ export function GreenlightApp() {
   const found = findRepoUrl(text);
   const repoUrl = found?.url ?? null;
   const target = agent === "scout" ? scoutTarget(text) : null;
+  const policyRepos = agent === "policy" ? Array.from(new Set((text.match(REPO_URLS) ?? []).map((u) => findRepoUrl(u)?.url).filter((u): u is string => Boolean(u)))) : [];
   const policyRepo = agent === "policy" ? (found?.repo ?? null) : null;
   const policy = usePolicy(policyRepo, POLICY_MAX_AGE_MS);
 
@@ -125,13 +128,34 @@ export function GreenlightApp() {
   }, []);
 
   const refreshRuns = useCallback(() => {
-    fetchRuns()
-      .then((list) => {
-        setRuns(list);
+    Promise.all([fetchRuns(), campaignApi.list().catch(() => [])])
+      .then(([list, campaigns]) => {
+        // Fleet and policy campaigns sit in the history with the runs, newest first.
+        const extra: RunSummary[] = campaigns.map((c) => ({
+          id: c.id,
+          kind: c.kind,
+          role: c.kind === "fleet" ? "scout" : "policy",
+          repo: c.label ?? c.kind,
+          mode: "pr_only",
+          viaFork: false,
+          status: c.status === "failed" ? "error" : c.status === "scanning" || c.status === "running" ? "running" : "done",
+          createdAt: c.created_at,
+        }));
+        setRuns([...list, ...extra].sort((a, b) => b.createdAt.localeCompare(a.createdAt)));
         setRunsError(null);
       })
       .catch((e: Error) => setRunsError(e.message));
   }, []);
+
+  const openCampaignView = useCallback(
+    (kind: "fleet" | "policy", id: string) => {
+      reset();
+      setView({ kind, id });
+      setReplay(false);
+      setUrl({ [kind]: id });
+    },
+    [reset],
+  );
 
   useEffect(() => {
     refreshRuns();
@@ -154,12 +178,16 @@ export function GreenlightApp() {
         const meta: RunMeta = {
           id: r.id,
           role: r.role ?? "fixer",
+          task: r.task,
+          campaignId: r.campaign_id,
+          package: r.package,
           repo: r.repo,
           mode: r.mode,
           viaFork: r.via_fork,
           private: info?.private ?? null,
           defaultBranch: info?.defaultBranch ?? null,
         };
+        setView(null);
         setReplay(isReplay);
         setUrl(isReplay ? { run: runId, replay: "1" } : { run: runId });
         follow.current = true;
@@ -176,12 +204,18 @@ export function GreenlightApp() {
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const runId = params.get("run");
+    const fleet = params.get("fleet");
+    const policyCampaign = params.get("policy");
+    if (!runId && (fleet || policyCampaign)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- restoring the view named in the URL, once
+      setView(fleet ? { kind: "fleet", id: fleet } : { kind: "policy", id: policyCampaign! });
+      return;
+    }
     if (!runId) {
       const repo = params.get("repo")?.trim();
       if (repo) {
         const url = findRepoUrl(repo)?.url ?? (/^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://github.com/${repo}` : repo);
         // Reading the URL once on mount is syncing with an external system.
-        // eslint-disable-next-line react-hooks/set-state-in-effect
         setText(url);
       }
       return;
@@ -190,34 +224,50 @@ export function GreenlightApp() {
     restore(runId, params.get("replay") === "1").finally(() => setRestoring(false));
   }, [restore]);
 
+  /** Fix starts a campaign (scan, then one package at a time); Scout a fleet campaign; Policy one PR per repo. */
   const launch = useCallback(
-    async (request: StartRequest) => {
+    async (request: LaunchRequest) => {
       setSendError(null);
-      const { runId, role, access: info } = await startAgentRun(request);
+      if (request.role === "scout") {
+        const { campaign_id } = await campaignApi.startFleet(request.target, "pr_only");
+        openCampaignView("fleet", campaign_id);
+        refreshRuns();
+        return;
+      }
+      if (request.role === "policy") {
+        const { campaign_id } = await campaignApi.startPolicy(request.repos);
+        openCampaignView("policy", campaign_id);
+        refreshRuns();
+        return;
+      }
+      const { campaignId, access: info } = await startCampaign(request.repo, request.mode);
+      setView(null);
       setReplay(false);
-      setUrl({ run: runId });
+      setUrl({ run: campaignId });
       follow.current = true;
-      const repo = info?.repo ?? (request.role === "scout" ? scoutKey(request.target) : (findRepoUrl(request.repo)?.repo ?? request.repo));
       open({
-        id: runId,
-        role,
-        repo,
-        mode: request.role === "fixer" ? request.mode : "pr_only",
-        viaFork: info?.viaFork ?? false,
-        private: info?.private ?? null,
-        defaultBranch: info?.defaultBranch ?? null,
+        id: campaignId,
+        role: "fixer",
+        task: "scan",
+        campaignId,
+        repo: info.repo,
+        mode: info.modeOptions.includes(request.mode) ? request.mode : "pr_only",
+        viaFork: info.viaFork,
+        private: info.private,
+        defaultBranch: info.defaultBranch,
       });
       refreshRuns();
     },
-    [open, refreshRuns],
+    [open, openCampaignView, refreshRuns],
   );
 
   const ready = access.status === "ready" ? access.access : null;
   const policyReady = policy?.status === "ready" ? policy.info : null;
-  const request = (): StartRequest | null => {
+  const request = (): LaunchRequest | null => {
     if (agent === "scout") return target ? { role: "scout", target } : null;
+    if (agent === "policy") return policyRepos.length > 0 ? { role: "policy", repos: policyRepos } : null;
     if (!repoUrl) return null;
-    return agent === "policy" ? { role: "policy", repo: repoUrl } : { role: "fixer", repo: repoUrl, mode };
+    return { role: "fixer", repo: repoUrl, mode };
   };
 
   // With a run open, anything that is not a new run request (no repo link, no scout target) goes to that
@@ -237,7 +287,7 @@ export function GreenlightApp() {
       ? Boolean(repoUrl && ready && ready.modeOptions.includes(mode))
       : agent === "scout"
         ? target !== null
-        : Boolean(repoUrl && policyReady && !policyReady.exists));
+        : policyRepos.length > 1 || Boolean(repoUrl && policyReady && !policyReady.exists));
 
   const note: ComposerNote | null =
     agent === "scout"
@@ -246,6 +296,8 @@ export function GreenlightApp() {
         : target
           ? { tone: "ok", text: OWNER_TARGET.test(target) ? `Scout every repo of ${target.replace(":", " ")}` : `Scout ${target.split(",").length} ${target.includes(",") ? "repos" : "repo"}` }
           : { tone: "muted", text: "Try org:name, user:name, or GitHub repo links" }
+      : agent === "policy" && policyRepos.length > 1
+        ? { tone: "ok", text: `Draft a policy for ${policyRepos.length} repos, one PR at a time. Repos that already have one are skipped` }
       : agent === "policy"
         ? !found
           ? text.trim() === "" ? null : { tone: "muted", text: "Paste a GitHub repo link to draft its policy" }
@@ -291,6 +343,7 @@ export function GreenlightApp() {
       const info = await fetchAccess(url);
       const fixMode: Mode = info.modeOptions.includes(mode) ? mode : (info.modeOptions[0] ?? "pr_only");
       setAgent("fixer");
+      // Fixing a repo is a campaign too: its scan first, then one package at a time.
       await launch({ role: "fixer", repo: url, mode: fixMode });
     } catch (e) {
       setSendError(e instanceof ApiError ? e.message : `Could not start a Fix run on ${repo}`);
@@ -305,7 +358,7 @@ export function GreenlightApp() {
         run.role === "scout"
           ? { role: "scout", target: run.repo.replace(/^repos:/, "") }
           : run.role === "policy"
-            ? { role: "policy", repo: `https://github.com/${run.repo}` }
+            ? { role: "policy", repos: [`https://github.com/${run.repo}`] }
             : { role: "fixer", repo: `https://github.com/${run.repo}`, mode: run.mode },
       );
     } catch (e) {
@@ -352,6 +405,7 @@ export function GreenlightApp() {
 
   const newRun = () => {
     reset();
+    setView(null);
     setReplay(false);
     setUrl(null);
     setText("");
@@ -380,7 +434,7 @@ export function GreenlightApp() {
   }, [eventCount, approvalStatus]);
 
   const hasRun = run !== null;
-  const showEmpty = !hasRun && !restoring;
+  const showEmpty = !hasRun && !restoring && view === null;
 
   return (
     <Tooltip.Provider delay={300}>
@@ -391,10 +445,11 @@ export function GreenlightApp() {
             className={clsx(mobileSidebar ? "max-lg:flex" : "max-lg:hidden", sidebarOpen ? "lg:flex" : "lg:hidden")}
             runs={runs}
             runsError={runsError}
-            activeRunId={run?.id ?? null}
-            onSelect={(id) => {
+            activeRunId={run?.id ?? view?.id ?? null}
+            onSelect={(summary) => {
               setMobileSidebar(false);
-              restore(id, true);
+              if (summary.kind === "fleet" || summary.kind === "policy") openCampaignView(summary.kind, summary.id);
+              else restore(summary.id, true);
             }}
             onNew={() => {
               setMobileSidebar(false);
@@ -427,6 +482,16 @@ export function GreenlightApp() {
                 )}
               </AnimatePresence>
 
+              {!hasRun && view !== null && (
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  {view.kind === "fleet" ? (
+                    <FleetCampaignView key={view.id} campaignId={view.id} onOpenCampaign={(id) => restore(id, false)} />
+                  ) : (
+                    <PolicyCampaignView key={view.id} campaignId={view.id} onOpenRun={(id) => restore(id, false)} />
+                  )}
+                </div>
+              )}
+
               {hasRun && (
                 <div
                   ref={scroller}
@@ -450,6 +515,7 @@ export function GreenlightApp() {
                       setLedgerRunId(run.id);
                     }}
                     onFixRepo={fixRepo}
+                    onOpenRun={(id) => restore(id, false)}
                     onAnswer={onAnswer}
                     answering={answering}
                   />

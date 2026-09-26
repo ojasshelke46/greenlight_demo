@@ -130,7 +130,7 @@ def no_gateway_env(monkeypatch):
 
 
 @asynccontextmanager
-async def api(gateway: Gateway, *, status: str = "done"):
+async def api(gateway: Gateway, *, status: str = "done", pr: bool = True):
     app = create_app()
     async with app.router.lifespan_context(app):
         ledger = app.state.ledger
@@ -141,6 +141,8 @@ async def api(gateway: Gateway, *, status: str = "done"):
             ledger.append_event(RUN_ID, sequence, event["type"], json.dumps(event), received.isoformat())
         ledger.set_status(RUN_ID, status)
         await ledger.flush()
+        if pr:
+            await ledger.append_note(RUN_ID, "pr", {"url": "https://github.com/acme/widgets/pull/7", "number": 7, "via_fork": False, "source": "tool_response"})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as gateway_http:
             app.state.http_client = gateway_http
@@ -320,3 +322,15 @@ async def test_receipt_requires_api_key(gateway_env, clock):
         response = await client.get(f"/runs/{RUN_ID}/receipt", headers={"Authorization": "Bearer wrong"})
 
     assert response.status_code == 401
+
+
+async def test_a_run_without_a_pr_fixed_nothing(gateway_env, clock):
+    gateway = Gateway(httpx.ConnectError("gateway down"))
+
+    async with api(gateway, pr=False) as (client, _):
+        await get_receipt(client)
+        clock.now += receipt_routes.SETTLE_SECONDS + 1
+        body = (await get_receipt(client)).json()
+
+    assert body["advisories_fixed"] == 0
+    assert body["model_calls"] == 4

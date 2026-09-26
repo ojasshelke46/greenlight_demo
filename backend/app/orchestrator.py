@@ -111,9 +111,10 @@ def result_fact(role: str, text: str) -> dict[str, Any]:
 def advisory_ids(vulnerabilities: list[dict[str, Any]]) -> list[str]:
     ids: list[str] = []
     for fact in vulnerabilities:
-        advisory = fact.get("advisory") or fact.get("advisory_id") or fact.get("id")
-        if isinstance(advisory, str) and advisory.strip() and advisory.strip() not in ids:
-            ids.append(advisory.strip())
+        listed = fact.get("advisories") if isinstance(fact.get("advisories"), list) else [fact.get("advisory") or fact.get("advisory_id") or fact.get("id")]
+        for advisory in listed:
+            if isinstance(advisory, str) and advisory.strip() and advisory.strip() not in ids:
+                ids.append(advisory.strip())
     return ids
 
 
@@ -131,6 +132,9 @@ class Orchestrator:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._pr_urls: dict[str, str] = {}
         self._guarded: set[str] = set()
+        self._info: dict[str, dict[str, Any]] = {}
+        # Set by the app: the campaign service that queues fixes one at a time.
+        self.campaigns: Any = None
 
     # Plumbing
 
@@ -157,6 +161,13 @@ class Orchestrator:
             task.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
+    async def run_info(self, run_id: str) -> dict[str, Any]:
+        """The run's whole run_meta note: role, and for campaign runs task, campaign_id, package and branch."""
+        if run_id not in self._info:
+            notes = await self._ledger.get_notes(run_id, kind=NOTE_RUN_META)
+            self._info[run_id] = notes[0]["payload"] if notes else {"role": "fixer"}
+        return self._info[run_id]
+
     async def meta(self, run_id: str) -> tuple[str, str | None]:
         """(role, parent run id) from the run's run_meta note; a run without one is a top level fixer run."""
         if run_id not in self._meta:
@@ -177,6 +188,7 @@ class Orchestrator:
         via_fork: bool = False,
         parent_run_id: str | None = None,
         purpose: str | None = None,
+        extra_meta: dict[str, Any] | None = None,
     ) -> str:
         """Start a TrueForge session and turn with the role's agent, record the run and its links, and pump it."""
         state = self._app.state
@@ -189,9 +201,10 @@ class Orchestrator:
             run_id=run_id, repo=repo, mode=mode, via_fork=via_fork, session_id=session_id, turn_id=turn.turn_id
         )
         self._meta[run_id] = (role, parent_run_id)
-        meta: dict[str, Any] = {"role": role}
+        meta: dict[str, Any] = {"role": role, **(extra_meta or {})}
         if parent_run_id is not None:
             meta.update(parent_run_id=parent_run_id, purpose=purpose)
+        self._info[run_id] = meta
         await self._ledger.append_note(run_id, NOTE_RUN_META, meta)
         if parent_run_id is not None:
             await self._ledger.append_note(
@@ -217,7 +230,8 @@ class Orchestrator:
             " (SELECT json_extract(n.payload_json, '$.role') FROM notes n"
             "   WHERE n.run_id = r.id AND n.kind = ? ORDER BY n.id LIMIT 1) AS role"
             " FROM runs r WHERE r.id NOT IN (SELECT run_id FROM notes WHERE kind = ?"
-            "   AND json_extract(payload_json, '$.parent_run_id') IS NOT NULL)"
+            "   AND (json_extract(payload_json, '$.parent_run_id') IS NOT NULL"
+            "     OR json_extract(payload_json, '$.campaign_id') IS NOT NULL))"
             " ORDER BY r.created_at DESC LIMIT ?",
             (NOTE_RUN_META, NOTE_RUN_META, limit),
         )
@@ -289,6 +303,8 @@ class Orchestrator:
         self._spawn(self.register_pr(run_id, match.group(0), None, via_fork, "tool_response"), f"PR for {run_id}")
 
     def facts_seen(self, run_id: str, found: list[dict[str, Any]]) -> None:
+        if self.campaigns is not None and any(fact.get("kind") == "scan_done" for fact in found):
+            self._spawn(self.campaigns.on_facts(run_id, found), f"Campaign facts for {run_id}")
         for fact in found:
             if fact.get("kind") != "pr" or not isinstance(fact.get("url"), str):
                 continue
@@ -308,10 +324,14 @@ class Orchestrator:
         """A PR is opened when create_pull_request answers with its URL or the agent reports a "pr" fact, whichever
         comes first. Recorded once as a chained note, then the provers start from it."""
         role, parent = await self.meta(run_id)
-        if role != "fixer" or parent is not None:
+        info = await self.run_info(run_id)
+        # A fix run or a policy run opens PRs; a scan never does.
+        if role not in ("fixer", "policy") or parent is not None or info.get("task") == "scan":
             return
+        created = False
         async with self._lock(run_id, "pr"):
             if await self.pr(run_id) is None:
+                created = True
                 match = PR_URL.search(url)
                 number = number if number is not None else (int(url.rstrip("/").rsplit("/", 1)[-1]) if match else None)
                 if via_fork is None:
@@ -322,7 +342,10 @@ class Orchestrator:
                 logger.info("Run %s opened %s (from %s)", run_id, url, source)
             stored = await self.pr(run_id)
         self._pr_urls[run_id] = stored["url"]
-        self._spawn(self._start_provers(run_id, stored["url"]), f"Prover trigger for {run_id}")
+        if role == "fixer":
+            self._spawn(self._start_provers(run_id, stored["url"]), f"Prover trigger for {run_id}")
+        if created and self.campaigns is not None:
+            self._spawn(self.campaigns.on_pr(run_id), f"Campaign PR for {run_id}")
 
     def turn_done(self, run_id: str, status: str, final_text: str) -> None:
         self._spawn(self._after_turn(run_id, status, final_text), f"Turn end for {run_id}")
@@ -345,6 +368,8 @@ class Orchestrator:
 
     async def _after_turn(self, run_id: str, status: str, final_text: str) -> None:
         role, parent = await self.meta(run_id)
+        if self.campaigns is not None and parent is None:
+            self._spawn(self.campaigns.on_turn_done(run_id, status), f"Campaign turn end for {run_id}")
         if role != "fixer":
             await facts.add_fact(run_id, result_fact(role, final_text))
             return

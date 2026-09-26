@@ -649,7 +649,10 @@ export class RunModel {
     }
 
     // Helper agents (scout, policy, prover, receipt, auditor) do not follow the fixer's pipeline.
-    const steps: Step[] = this.meta.role === "fixer" ? order.map(([id, label]) => ({ id, label, status: "waiting", ...facts[id] })) : this.helperSteps(blocks);
+    // A campaign scan only sets up, runs the baseline and audits: it never upgrades or opens a PR.
+    const scanOnly = this.meta.task === "scan";
+    const stepOrder = scanOnly ? order.filter(([id]) => id === "sandbox" || id === "baseline" || id === "scan") : order;
+    const steps: Step[] = this.meta.role === "fixer" ? stepOrder.map(([id, label]) => ({ id, label, status: "waiting", ...facts[id] })) : this.helperSteps(blocks);
 
     if (vulnBlock) {
       vulnBlock.items = (vulnerabilities ?? []).map((v): Vulnerability =>
@@ -733,7 +736,7 @@ export class RunModel {
   private failure(steps: Step[], explanation: string | null, prOpen: boolean): Failure | null {
     const end = this.turnEnd;
     if (!end) return null;
-    if (end.status === "done" && (prOpen || this.pendingRefs || this.meta.role !== "fixer")) return null;
+    if (end.status === "done" && (prOpen || this.pendingRefs || this.meta.role !== "fixer" || this.meta.task === "scan")) return null;
     const failed = steps.find((s) => s.status === "failed");
     const reason =
       end.status === "done"
@@ -762,6 +765,7 @@ export class RunModel {
     if (approval.status === "decided" && approval.decision === "reject" && end) return { tone: "fail", working: false, label: "Merge rejected", detail: "The pull request stays open" };
     if (end && end.status !== "done") return { tone: "fail", working: false, label: "Run stopped", detail: end.reason === "server-execution-timeout" ? "TrueForge hit its turn time limit" : end.message ?? "The agent stopped" };
     if (pending && this.paused) return { tone: "progress", working: false, label: "Awaiting approval", detail: pending.pullNumber !== null ? `Merge PR #${pending.pullNumber}` : `Approve ${pending.tool}` };
+    if (end && this.meta.task === "scan") return { tone: "done", working: false, label: "Scan complete", detail: "Nothing was changed" };
     if (end && this.meta.role !== "fixer") return { tone: "done", working: false, label: "Done", detail: "Report ready" };
     if (end) return prOpen ? { tone: "done", working: false, label: "Pull request open", detail: "Ready for review" } : { tone: "fail", working: false, label: "Run ended", detail: "No pull request was opened" };
     if (this.turnsStarted === 0) return { tone: "progress", working: true, label: "Starting", detail: "Waking the agent" };

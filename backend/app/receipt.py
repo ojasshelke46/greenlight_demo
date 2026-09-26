@@ -152,8 +152,10 @@ async def build_receipt(run_id: str, *, ledger: Ledger, http: httpx.AsyncClient,
     facts = _ledger_facts(trail, turns)
     gateway_calls = await fetch_run_calls(facts.window, http, settings)
 
+    # Fixed means shipped for review: a run that opened no PR fixed nothing, whatever its sandbox audits showed.
+    opened_pr = bool(await ledger.get_notes(run_id, kind="pr"))
     common = {
-        "advisories_fixed": facts.advisories_fixed,
+        "advisories_fixed": facts.advisories_fixed if opened_pr else 0,
         "duration_seconds": facts.duration_seconds,
         "trace_url": None,
     }

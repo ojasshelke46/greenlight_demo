@@ -83,6 +83,10 @@ class RunResponse(BaseModel):
     pr_via_fork: bool | None
     # A fix run that ended without opening a PR by either route.
     stopped_without_pr: bool
+    # Campaign runs: "scan" (the campaign itself, id = campaign id) or "fix" (one package), else None.
+    task: str | None = None
+    campaign_id: str | None = None
+    package: str | None = None
 
 
 class ChildRun(BaseModel):
@@ -243,6 +247,8 @@ async def get_run(run_id: str, request: Request) -> RunResponse:
     run = await _get_run(ledger, run_id)
     role, parent_run_id = await orchestrator.meta(run_id)
     pr = await orchestrator.pr(run_id)
+    info = await orchestrator.run_info(run_id)
+    task = info.get("task")
     return RunResponse(
         **run,
         role=role,
@@ -250,7 +256,10 @@ async def get_run(run_id: str, request: Request) -> RunResponse:
         pr_url=pr["url"] if pr else None,
         pr_number=pr.get("number") if pr else None,
         pr_via_fork=pr.get("via_fork") if pr else None,
-        stopped_without_pr=role == "fixer" and parent_run_id is None and run["status"] == "done" and pr is None,
+        stopped_without_pr=role == "fixer" and parent_run_id is None and task != "scan" and run["status"] == "done" and pr is None,
+        task=task,
+        campaign_id=run_id if task == "scan" and info.get("campaign") else info.get("campaign_id"),
+        package=info.get("package"),
     )
 
 

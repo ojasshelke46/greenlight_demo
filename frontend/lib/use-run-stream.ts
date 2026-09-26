@@ -6,18 +6,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import { RunModel } from "./run-model";
-import type { Role, RunState } from "./state";
+import type { Mode, Role, RunMeta, RunState } from "./state";
 
 const NO_APPROVAL = { status: "none" } as const;
 
-export function useRunStream(runId: string | null, role: Role, repo: string, enabled: boolean): RunState | null {
+export function useRunStream(runId: string | null, role: Role, repo: string, enabled: boolean, mode: Mode = "pr_only", task: RunMeta["task"] = null): RunState | null {
   const [run, setRun] = useState<RunState | null>(null);
   const frame = useRef<number | null>(null);
 
   useEffect(() => {
     if (!enabled || !runId) return;
-    // Helper runs never merge, so their mode is always pr_only.
-    const model = new RunModel({ id: runId, role, repo, mode: "pr_only", viaFork: false, private: null, defaultBranch: null });
+    // Helper runs never merge, so they default to pr_only; a campaign's fix run passes its own mode and task.
+    const model = new RunModel({ id: runId, role, repo, mode, task, viaFork: false, private: null, defaultBranch: null });
     let connection: RunState["connection"] = "connecting";
     const render = () => {
       frame.current = null;
@@ -62,7 +62,7 @@ export function useRunStream(runId: string | null, role: Role, repo: string, ena
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
     };
-  }, [enabled, runId, role, repo]);
+  }, [enabled, runId, role, repo, mode, task]);
 
   return enabled && run?.id === runId ? run : null;
 }
