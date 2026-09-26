@@ -55,14 +55,6 @@ export async function fetchRun(runId: string): Promise<BackendRun> {
   return json<BackendRun>(await fetch(`/api/run?runId=${encodeURIComponent(runId)}`));
 }
 
-export type Decision = { decision: "approve" | "reject"; approver: string; decided_at: string; status: string; replayed: boolean };
-
-export async function sendDecision(runId: string, decision: "approve" | "reject", approver: string): Promise<Decision> {
-  return json<Decision>(
-    await fetch("/api/approve", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ runId, decision, approver }) }),
-  );
-}
-
 export async function fetchRelease(runId: string): Promise<Release> {
   const r = await json<{ merged: boolean; merge_commit_sha: string | null; status: string | null; conclusion: string | null; url: string | null }>(
     await fetch(`/api/release?runId=${encodeURIComponent(runId)}`),

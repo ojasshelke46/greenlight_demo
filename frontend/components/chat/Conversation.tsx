@@ -4,6 +4,7 @@ import { ArrowsClockwise, GithubLogo } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Fragment, useState, type ReactNode } from "react";
+import { ProofPanel } from "@/components/features/proof/ProofPanel";
 import { Orb } from "@/components/Orb";
 import { MODE_LABEL, type Block, type PendingApproval, type RunState, type Tone } from "@/lib/state";
 import { ApprovalCard, CompletionCard, FailureCard, NotAllowedCard, PausedCard, QuestionCard, ReceiptCard, RejectedCard } from "./Approval";
@@ -101,6 +102,8 @@ export function Conversation({ run, flare, retrying, resuming, controlError, onD
                 <div className="h-4 w-1/2 animate-pulse rounded-full bg-card motion-reduce:animate-none" />
               </div>
             )}
+
+            <ProofPanel variant="run" run={run} />
           </motion.div>
 
           <Outcome run={run} awaiting={awaiting} decided={decided} pending={pending} canShip={canShip} retrying={retrying} resuming={resuming} controlError={controlError} onDecide={onDecide} onRetry={onRetry} onResume={onResume} enter={enter} />

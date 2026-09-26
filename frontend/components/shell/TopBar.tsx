@@ -2,6 +2,7 @@
 
 import { SidebarSimple } from "@phosphor-icons/react";
 import clsx from "clsx";
+import Link from "next/link";
 import { LogoMark } from "@/components/LogoMark";
 import { Tip } from "@/components/Tip";
 
@@ -34,6 +35,9 @@ export function TopBar({ sidebarOpen, onOpenSidebar, replay, trueforge, userName
         <span className="ml-2 rounded-full border border-progress/40 bg-progress/10 px-2.5 py-0.5 font-mono text-[0.7rem] font-semibold tracking-[0.14em] text-progress">REPLAY</span>
       )}
       <div className="ml-auto flex items-center gap-4">
+        <Link href="/fleet" className="text-[0.82rem] text-fg-muted transition-colors duration-150 hover:text-fg">
+          Fleet
+        </Link>
         <Tip label={trueforge === null ? "Checking the TrueForge connection" : trueforge ? "The backend can reach TrueForge" : "The backend cannot reach TrueForge"}>
           <span tabIndex={0} className="flex items-center gap-2 text-[0.82rem] text-fg-muted">
             <span className={clsx("size-2 shrink-0 rounded-full", trueforge === null ? "bg-fg-subtle" : trueforge ? "bg-accent shadow-[0_0_8px_var(--accent)]" : "bg-fail")} aria-hidden />

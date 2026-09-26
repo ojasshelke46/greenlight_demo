@@ -5,7 +5,9 @@ import { CheckCircle, CircleNotch, Hand, Prohibit, RocketLaunch, X, XCircle } fr
 import clsx from "clsx";
 import { useEffect, useState, type ReactNode } from "react";
 import { fetchLedger, type Ledger } from "@/lib/api";
+import { PolicyPanel } from "@/components/features/policy/PolicyPanel";
 import { POLICY } from "@/lib/policy";
+import type { RunState } from "@/lib/state";
 
 // Side sheets: occasional, 360ms on the iOS drawer curve, entering and leaving from the right.
 function Sheet({ open, onOpenChange, title, description, width, children }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; width: string; children: ReactNode }) {
@@ -41,7 +43,7 @@ const POLICY_ICON = {
   never: { Icon: Prohibit, className: "text-fail" },
 } as const;
 
-export function PolicySheet({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+export function PolicySheet({ open, onOpenChange, run }: { open: boolean; onOpenChange: (open: boolean) => void; run: RunState | null }) {
   return (
     <Sheet open={open} onOpenChange={onOpenChange} title="Policy" description="What the agent may do in every run." width="w-[440px]">
       <div className="flex flex-col gap-7">
@@ -64,6 +66,7 @@ export function PolicySheet({ open, onOpenChange }: { open: boolean; onOpenChang
             </section>
           );
         })}
+        <PolicyPanel variant="run" run={run} />
         <p className="rounded-[var(--radius-card)] border border-line bg-card px-4 py-3 text-[0.85rem] leading-relaxed text-fg">
           The backend revalidates every approval before anything merges.
         </p>

@@ -3,6 +3,8 @@
 
 // Status tones appear only inside agent output: fail (vulnerable or failing), progress (in progress),
 // done (passing or done).
+import type { FeaturesState } from "./features";
+
 export type Tone = "fail" | "progress" | "done";
 export type Mode = "ship" | "pr_only";
 
@@ -166,6 +168,8 @@ export type RunState = RunMeta & {
   pausing: boolean;
   // Paused, errored or timed out runs can continue with a new turn in the same session.
   canResume: boolean;
+  // Owned by the features in lib/features; folded from the same events as everything above.
+  features: FeaturesState;
 };
 
 export type RunSummary = {

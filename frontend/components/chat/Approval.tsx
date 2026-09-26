@@ -3,6 +3,8 @@
 import { ArrowClockwise, ArrowSquareOut, ChatCircleDots, PauseCircle, Play, CheckCircle, CircleNotch, FileText, GitMerge, GitPullRequest, Prohibit, ShieldCheck, Warning, XCircle } from "@phosphor-icons/react";
 import clsx from "clsx";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { PolicyPanel } from "@/components/features/policy/PolicyPanel";
+import { ProofPanel } from "@/components/features/proof/ProofPanel";
 import type { AgentQuestion, ApprovalContext, ApprovalState, PendingApproval, PullRequest, Release, RunState } from "@/lib/state";
 import { CopyButton } from "./Blocks";
 
@@ -160,6 +162,9 @@ export function ApprovalCard({
             {refused}
           </p>
         )}
+
+        <ProofPanel variant="approval" run={run} />
+        <PolicyPanel variant="approval" run={run} />
 
         <div className="mt-6 flex flex-wrap items-center gap-5">
           <HoldToApprove disabled={sending} busy={sending && approval.decision === "approve"} onComplete={() => onDecide("approve")} />

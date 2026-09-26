@@ -23,6 +23,8 @@ import type {
   Tone,
   Vulnerability,
 } from "./state";
+import { featuresReducer, initialFeaturesState, type FeaturesState } from "./features";
+import { FactStream } from "./features/markers";
 
 type Json = Record<string, unknown>;
 
@@ -229,6 +231,8 @@ export class RunModel {
   private turnEnd: TurnEnd | null = null;
   // Sequence of the latest turn.done seen, kept across resumes to spot calls a past turn abandoned.
   private lastTurnDoneSeq = 0;
+  private factStream = new FactStream();
+  private features: FeaturesState = initialFeaturesState;
 
   constructor(meta: RunMeta) {
     this.meta = meta;
@@ -301,6 +305,8 @@ export class RunModel {
         break;
       }
     }
+
+    this.features = featuresReducer(this.features, { sequence, event, facts: this.factStream.feed(event) });
   }
 
   private message(id: string, seq: number, at: number): Message {
@@ -651,6 +657,7 @@ export class RunModel {
       paused,
       pausing: pausing && !this.turnEnd,
       canResume,
+      features: this.features,
     };
   }
 

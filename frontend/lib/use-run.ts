@@ -1,11 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, controlRun, fetchAcceptedDecision, fetchRelease, sendDecision } from "./api";
+import { ApiError, controlRun, fetchAcceptedDecision, fetchRelease } from "./api";
+import type { ApprovalResult } from "./features/approval";
 import { RunModel } from "./run-model";
 import type { ApprovalState, Release, RunMeta, RunState } from "./state";
 
 const RELEASE_POLL_MS = 3000;
+
+type SubmitApproval = (runId: string, decision: "approve" | "reject") => Promise<ApprovalResult>;
 
 export function useRun() {
   const model = useRef<RunModel | null>(null);
@@ -104,22 +107,23 @@ export function useRun() {
   );
 
   const decide = useCallback(
-    async (decision: "approve" | "reject", approver: string) => {
+    async (decision: "approve" | "reject", submit: SubmitApproval) => {
       const m = model.current;
       const pending = m?.pendingApproval();
       if (!m || !pending) return;
       approvalRef.current = { status: "sending", pending, decision };
       schedule();
-      try {
-        const result = await sendDecision(m.meta.id, decision, approver);
-        approvalRef.current = { status: "decided", decision: result.decision, approver: result.approver, decidedAt: result.decided_at };
-        schedule();
+      const result = await submit(m.meta.id, decision);
+      if (result.kind === "decided") {
+        approvalRef.current = { status: "decided", decision: result.decision, approver: result.approver, decidedAt: result.decidedAt };
         connect(m.meta.id, m.lastSequence);
-      } catch (error) {
-        const reason = error instanceof ApiError ? error.message : "Could not reach Greenlight";
-        approvalRef.current = { status: "refused", pending, reason };
-        schedule();
+      } else if (result.kind === "need_more") {
+        // Recorded, but the agent stays paused until more is given; the reason is in the approval context.
+        approvalRef.current = { status: "none" };
+      } else {
+        approvalRef.current = { status: "refused", pending, reason: result.reason };
       }
+      schedule();
     },
     [connect, schedule],
   );

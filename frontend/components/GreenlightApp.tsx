@@ -12,6 +12,7 @@ import { LedgerDrawer, PolicySheet } from "@/components/shell/Sheets";
 import { Sidebar } from "@/components/shell/Sidebar";
 import { TopBar } from "@/components/shell/TopBar";
 import { ApiError, fetchAccess, fetchHealth, fetchRun, fetchRuns, startRun } from "@/lib/api";
+import { useApproval } from "@/lib/features/approval";
 import { findRepoUrl, type AccessState, type Mode, type RunMeta, type RunSummary } from "@/lib/state";
 import { useRun } from "@/lib/use-run";
 
@@ -34,6 +35,7 @@ function setUrl(params: Record<string, string> | null) {
 export function GreenlightApp() {
   const reduce = useReducedMotion();
   const { run, open, decide, pause, resume, reset } = useRun();
+  const { submitApproval } = useApproval();
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const scroller = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
@@ -135,13 +137,21 @@ export function GreenlightApp() {
     [open],
   );
 
-  // A run in the URL survives a reload; ?replay=1 marks a replayed run.
+  // A run in the URL survives a reload; ?replay=1 marks a replayed run. Without a run, ?repo=
+  // (a repo link or owner/repo) prefills the launch composer.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const runId = params.get("run");
-    if (!runId) return;
-    // Reading the URL once on mount is syncing with an external system.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (!runId) {
+      const repo = params.get("repo")?.trim();
+      if (repo) {
+        const url = findRepoUrl(repo)?.url ?? (/^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://github.com/${repo}` : repo);
+        // Reading the URL once on mount is syncing with an external system.
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setText(url);
+      }
+      return;
+    }
     setRestoring(true);
     restore(runId, params.get("replay") === "1").finally(() => setRestoring(false));
   }, [restore]);
@@ -209,7 +219,7 @@ export function GreenlightApp() {
       setFlare(true);
       setTimeout(() => setFlare(false), 800);
     }
-    decide(decision, USER_NAME).then(refreshRuns);
+    decide(decision, submitApproval).then(refreshRuns);
   };
 
   const newRun = () => {
@@ -346,7 +356,7 @@ export function GreenlightApp() {
         </div>
       </div>
 
-      <PolicySheet open={policyOpen} onOpenChange={setPolicyOpen} />
+      <PolicySheet open={policyOpen} onOpenChange={setPolicyOpen} run={run} />
       <LedgerDrawer runId={ledgerRunId} open={ledgerRunId !== null} onOpenChange={(o) => !o && setLedgerRunId(null)} />
     </Tooltip.Provider>
   );
