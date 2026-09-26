@@ -1,6 +1,8 @@
 "use client";
 
 import type { RunState } from "@/lib/state";
+import { ApprovalPolicy } from "./ApprovalPolicy";
+import { RepoRules } from "./RepoRules";
 
 export type PolicyPanelProps = {
   variant: "run" | "approval";
@@ -8,7 +10,7 @@ export type PolicyPanelProps = {
   run: RunState | null;
 };
 
-export function PolicyPanel(props: PolicyPanelProps) {
-  void props;
-  return null;
+export function PolicyPanel({ variant, run }: PolicyPanelProps) {
+  if (variant === "approval") return run ? <ApprovalPolicy run={run} /> : null;
+  return <RepoRules repo={run?.repo ?? null} />;
 }
