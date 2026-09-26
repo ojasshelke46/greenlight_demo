@@ -21,7 +21,11 @@ SERVER_OPTIONS: dict[str, Any] = {
 
 
 def dev() -> None:
-    uvicorn.run("app.main:app", host=HOST, port=PORT, reload=True, **SERVER_OPTIONS)
+    # Without this, the ledger writing to its default ./*.db path inside backend/ triggers
+    # its own reload, which restarts the server (and drops its in-memory runs) mid-write.
+    uvicorn.run(
+        "app.main:app", host=HOST, port=PORT, reload=True, reload_excludes=["*.db", "*.db-*"], **SERVER_OPTIONS
+    )
 
 
 def serve() -> None:
