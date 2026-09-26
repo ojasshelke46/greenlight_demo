@@ -243,7 +243,7 @@ async def decide_approval(run_id: str, body: ApprovalRequest, request: Request, 
                         run_id=run_id, status=run["status"], replayed=False, reason=verdict.reason, **_decision(waiting)
                     )
         except ApprovalRefused as exc:
-            await ledger.record_approval(
+            await ledger.append_approval(
                 run_id=run_id,
                 tool_name=tool_name,
                 arguments=arguments,
@@ -254,7 +254,7 @@ async def decide_approval(run_id: str, body: ApprovalRequest, request: Request, 
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.reason) from exc
 
         # The decision is durable before TrueForge hears about it.
-        decision = await ledger.record_approval(
+        decision = await ledger.append_approval(
             run_id=run_id,
             tool_name=tool_name,
             arguments=arguments,

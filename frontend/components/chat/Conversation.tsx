@@ -6,6 +6,8 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Fragment, useState, type ReactNode } from "react";
 import { ProofPanel } from "@/components/features/proof/ProofPanel";
 import { Orb } from "@/components/Orb";
+import { AuditSlot } from "@/components/run/AuditSlot";
+import { ReceiptSlot } from "@/components/run/ReceiptSlot";
 import { MODE_LABEL, type Block, type PendingApproval, type RunState, type Tone } from "@/lib/state";
 import { ApprovalCard, CompletionCard, FailureCard, NotAllowedCard, PausedCard, QuestionCard, ReceiptCard, RejectedCard } from "./Approval";
 import { ActionRow, DiffBlock, PrCard, StepRail, TerminalBlock, VulnBlock } from "./Blocks";
@@ -153,8 +155,32 @@ function Outcome({
     out.push(card("not-allowed", <NotAllowedCard pending={pending} sending={run.approval.status === "sending"} onReject={() => onDecide("reject")} />));
   }
   if (decided?.decision === "reject") out.push(card("rejected", <RejectedCard approver={decided.approver} />));
-  if (decided?.decision === "approve" && run.merged) out.push(card("receipt", <ReceiptCard release={run.release} approval={run.approval} pr={run.pullRequest} />));
-  if (!canShip && run.finished && run.pullRequest && !run.failure) out.push(card("completion", <CompletionCard pr={run.pullRequest} />));
+  if (decided?.decision === "approve" && run.merged) {
+    const conclusion = run.release?.conclusion ?? null;
+    const finalStatus = conclusion === null ? null : conclusion === "success" ? "shipped" : `release_${conclusion}`;
+    out.push(
+      card(
+        "receipt",
+        <div className="flex flex-col gap-4">
+          <ReceiptCard release={run.release} approval={run.approval} pr={run.pullRequest} />
+          <ReceiptSlot runId={run.id} finalStatus={finalStatus} />
+          <AuditSlot runId={run.id} finalStatus={finalStatus} />
+        </div>,
+      ),
+    );
+  }
+  if (!canShip && run.finished && run.pullRequest && !run.failure) {
+    out.push(
+      card(
+        "completion",
+        <div className="flex flex-col gap-4">
+          <CompletionCard pr={run.pullRequest} />
+          <ReceiptSlot runId={run.id} finalStatus="handed_off" />
+          <AuditSlot runId={run.id} finalStatus="handed_off" />
+        </div>,
+      ),
+    );
+  }
   if (run.question) out.push(card("question", <QuestionCard question={run.question} onRetry={onRetry} retrying={retrying} />));
   if (run.paused) {
     const step = run.steps.find((s) => s.status === "paused")?.label ?? null;
