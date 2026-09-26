@@ -12,9 +12,11 @@ A tiny CommonJS library with three functions:
 | --- | --- | --- |
 | `slugify(text)` | `src/slugify.js` | none |
 | `formatBytes(bytes)` | `src/formatBytes.js` | none |
-| `checkUrl(url)` | `src/checkUrl.js` | `node-fetch` |
+| `checkUrl(url, { token })` | `src/checkUrl.js` | `node-fetch` |
 
-Tests use the built in `node:test` runner, so there are no dev dependencies. The `checkUrl` test starts a local HTTP server and never touches the internet.
+`checkUrl` takes an optional `{ token }`. When a token is given it is sent as an `Authorization: Bearer <token>` header.
+
+Tests use the built in `node:test` runner, so there are no dev dependencies. The `checkUrl` tests start local HTTP servers and never touch the internet.
 
 ```sh
 npm ci
@@ -25,7 +27,20 @@ npm test
 
 `node-fetch` is pinned to `2.6.0`, which is affected by [GHSA-r683-j2x4-v87g](https://osv.dev/vulnerability/GHSA-r683-j2x4-v87g): secure headers such as `authorization` and `cookie` are forwarded when a request redirects to an untrusted site. `npm audit` flags it.
 
-The clean upgrade is `node-fetch` 3.x. Version 3 ships as an ES module only, so `require('node-fetch')` in `src/checkUrl.js` stops working and exactly one test fails. The expected fix is loading it with a dynamic `import()` inside `checkUrl`.
+The vulnerability is reachable through this library's own API. `checkUrl(url, { token })` sends the token as an `Authorization` header, and if `url` redirects to a different host, node-fetch 2.6.0 forwards that header to it. A caller checking a URL they do not fully control can leak their token.
+
+The clean upgrade is `node-fetch` 3.x. Version 3 ships as an ES module only, so `require('node-fetch')` in `src/checkUrl.js` no longer returns the fetch function (current Node returns the module namespace, so calls fail with `fetch is not a function`) and both `checkUrl` tests fail. The expected fix is loading it with a dynamic `import()` inside `checkUrl`. With 3.3.2 and that fix, the token is no longer forwarded when a request redirects to another host.
+
+## Greenlight policy
+
+`.greenlight.yml` at the repo root tells Greenlight who may approve a merge and when:
+
+| Key | Meaning |
+| --- | --- |
+| `approvers` | GitHub usernames allowed to approve a merge |
+| `required_approvals` | How many of them must approve |
+| `allow_major_upgrades` | Whether a fix may jump a major version, as node-fetch 2 to 3 does |
+| `freeze.timezone`, `freeze.windows` | Times when nothing merges, in that timezone |
 
 ## Releases
 
